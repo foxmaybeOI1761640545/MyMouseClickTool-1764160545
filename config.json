@@ -1,0 +1,17 @@
+{
+  "strings": [
+    {
+      "text": "YYY",
+      "interval_ms": 1000
+    },
+    {
+      "text": "O",
+      "interval_ms": 100
+    },
+    {
+      "text": "LLLIII",
+      "interval_ms": 100
+    }
+  ],
+  "char_interval_ms": 100
+}
