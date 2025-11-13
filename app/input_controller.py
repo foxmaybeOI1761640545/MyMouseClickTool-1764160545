@@ -11,23 +11,23 @@ class InputController:
         self.controller = Controller()
         self.running = threading.Event()
         self.paused = threading.Event()
-        self.text = ""
-        self.interval_ms = 1000
+        self.strings = []
+        self.char_interval_ms = 1
         self.thread = None
     
-    def start(self, text: str, interval_ms: int):
+    def start(self, strings: list, char_interval_ms: int):
         """
         启动输入循环
         
         Args:
-            text: 要输入的字符串
-            interval_ms: 时间间隔（毫秒）
+            strings: 字符串列表，每个元素为 {"text": str, "interval_ms": int}
+            char_interval_ms: 字符间隔（毫秒）
         """
         if self.running.is_set():
             return
         
-        self.text = text
-        self.interval_ms = interval_ms
+        self.strings = strings
+        self.char_interval_ms = char_interval_ms
         self.running.set()
         self.paused.clear()
         
@@ -70,21 +70,41 @@ class InputController:
     def _input_loop(self):
         """输入循环逻辑（在独立线程中运行）"""
         while self.running.is_set():
-            # 如果暂停，等待恢复
-            while self.paused.is_set() and self.running.is_set():
-                time.sleep(0.1)
+            # 遍历所有字符串
+            for string_item in self.strings:
+                # 如果暂停，等待恢复
+                while self.paused.is_set() and self.running.is_set():
+                    time.sleep(0.1)
+                
+                if not self.running.is_set():
+                    break
+                
+                text = string_item.get("text", "")
+                if text:
+                    # 逐字符输入，使用字符间隔
+                    try:
+                        for char in text:
+                            if not self.running.is_set():
+                                break
+                            # 如果暂停，等待恢复
+                            while self.paused.is_set() and self.running.is_set():
+                                time.sleep(0.1)
+                            if not self.running.is_set():
+                                break
+                            self.controller.type(char)
+                            # 字符间隔（最后一个字符后不需要间隔）
+                            if char != text[-1] and self.running.is_set():
+                                time.sleep(self.char_interval_ms / 100.0)
+                    except Exception as e:
+                        print(f"输入错误: {e}")
+                        break
+                
+                # 字符串输入完成后，等待该字符串的间隔时间
+                if self.running.is_set() and string_item != self.strings[-1]:
+                    interval_ms = string_item.get("interval_ms", 100)
+                    time.sleep(interval_ms / 100.0)
             
+            # 所有字符串输入完成后，如果还在运行，继续循环
             if not self.running.is_set():
                 break
-            
-            # 输入字符串
-            try:
-                self.controller.type(self.text)
-            except Exception as e:
-                print(f"输入错误: {e}")
-                break
-            
-            # 等待指定时间间隔
-            if self.running.is_set():
-                time.sleep(self.interval_ms / 1000.0)
 

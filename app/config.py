@@ -14,9 +14,38 @@ class ConfigManager:
         """
         self.config_file = config_file
         self.default_config = {
-            "text": "",
-            "interval_ms": 1000
+            "strings": [],
+            "char_interval_ms": 100
         }
+    
+    def _migrate_old_config(self, config: dict) -> dict:
+        """
+        将旧配置格式迁移为新格式
+        
+        Args:
+            config: 旧配置字典
+            
+        Returns:
+            dict: 新格式配置字典
+        """
+        # 如果配置中有旧的text和interval_ms，说明是旧格式
+        if "text" in config and "strings" not in config:
+            new_config = {
+                "strings": [
+                    {
+                        "text": config.get("text", ""),
+                        "interval_ms": config.get("interval_ms", 100)
+                    }
+                ],
+                "char_interval_ms": config.get("char_interval_ms", 1)
+            }
+            return new_config
+        # 如果是新格式但缺少某些字段，补充默认值
+        if "strings" not in config:
+            config["strings"] = []
+        if "char_interval_ms" not in config:
+            config["char_interval_ms"] = 1
+        return config
     
     def load_config(self) -> dict:
         """
@@ -29,6 +58,8 @@ class ConfigManager:
             try:
                 with open(self.config_file, 'r', encoding='utf-8') as f:
                     config = json.load(f)
+                    # 迁移旧配置格式
+                    config = self._migrate_old_config(config)
                     # 确保配置包含所有必需的键
                     for key in self.default_config:
                         if key not in config:
@@ -40,17 +71,17 @@ class ConfigManager:
         else:
             return self.default_config.copy()
     
-    def save_config(self, text: str, interval_ms: int):
+    def save_config(self, strings: list, char_interval_ms: int):
         """
         保存配置到文件
         
         Args:
-            text: 要保存的字符串内容
-            interval_ms: 时间间隔（毫秒）
+            strings: 字符串列表，每个元素为 {"text": str, "interval_ms": int}
+            char_interval_ms: 字符间隔（毫秒）
         """
         config = {
-            "text": text,
-            "interval_ms": interval_ms
+            "strings": strings,
+            "char_interval_ms": char_interval_ms
         }
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
