@@ -1,0 +1,10 @@
+# SpecStory explanation file
+.specstory/.what-is-this.md
+.specstory/
+
+# Cursor
+.cursorindexingignore
+
+# PyCharm
+.idea/
+__pycache__/
