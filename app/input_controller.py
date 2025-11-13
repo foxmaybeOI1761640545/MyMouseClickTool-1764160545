@@ -94,15 +94,15 @@ class InputController:
                             self.controller.type(char)
                             # 字符间隔（最后一个字符后不需要间隔）
                             if char != text[-1] and self.running.is_set():
-                                time.sleep(self.char_interval_ms / 100.0)
+                                time.sleep(self.char_interval_ms / 1000.0)
                     except Exception as e:
                         print(f"输入错误: {e}")
                         break
                 
                 # 字符串输入完成后，等待该字符串的间隔时间
                 if self.running.is_set() and string_item != self.strings[-1]:
-                    interval_ms = string_item.get("interval_ms", 100)
-                    time.sleep(interval_ms / 100.0)
+                    interval_ms = string_item.get("interval_ms", 1000)
+                    time.sleep(interval_ms / 1000.0)
             
             # 所有字符串输入完成后，如果还在运行，继续循环
             if not self.running.is_set():
