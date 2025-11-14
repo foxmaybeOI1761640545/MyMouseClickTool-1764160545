@@ -7,11 +7,25 @@ from pynput.keyboard import Controller, Key
 # Windows API 常量
 INPUT_KEYBOARD = 1
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
+MAPVK_VK_TO_VSC = 0
 
 # Windows API 虚拟键码
 VK_SPACE = 0x20
 VK_RETURN = 0x0D
 VK_TAB = 0x09
+
+# 数字键盘虚拟键码 (Numpad)
+VK_NUMPAD0 = 0x60
+VK_NUMPAD1 = 0x61
+VK_NUMPAD2 = 0x62
+VK_NUMPAD3 = 0x63
+VK_NUMPAD4 = 0x64
+VK_NUMPAD5 = 0x65
+VK_NUMPAD6 = 0x66
+VK_NUMPAD7 = 0x67
+VK_NUMPAD8 = 0x68
+VK_NUMPAD9 = 0x69
 
 # 定义 Windows API 结构
 class KEYBDINPUT(ctypes.Structure):
@@ -58,6 +72,11 @@ user32 = ctypes.windll.user32
 SendInput = user32.SendInput
 SendInput.argtypes = [wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
 SendInput.restype = wintypes.UINT
+
+# 定义 MapVirtualKey 函数，用于将虚拟键码转换为扫描码
+MapVirtualKey = user32.MapVirtualKeyW
+MapVirtualKey.argtypes = [wintypes.UINT, wintypes.UINT]
+MapVirtualKey.restype = wintypes.UINT
 
 
 class InputController:
@@ -142,9 +161,22 @@ class InputController:
         if 'A' <= char_upper <= 'Z':
             return ord(char_upper)
         
-        # 数字键 0-9 (0x30-0x39)
+        # 数字键 0-9 - 使用数字键盘虚拟键码 (0x60-0x69)
+        # 这样某些应用程序才能正确识别数字键盘输入
+        numpad_map = {
+            '0': VK_NUMPAD0,
+            '1': VK_NUMPAD1,
+            '2': VK_NUMPAD2,
+            '3': VK_NUMPAD3,
+            '4': VK_NUMPAD4,
+            '5': VK_NUMPAD5,
+            '6': VK_NUMPAD6,
+            '7': VK_NUMPAD7,
+            '8': VK_NUMPAD8,
+            '9': VK_NUMPAD9,
+        }
         if '0' <= char <= '9':
-            return ord(char)
+            return numpad_map[char]
         
         # 特殊字符映射
         special_chars = {
@@ -171,6 +203,18 @@ class InputController:
         """
         return char
     
+    def _is_numpad_key(self, vk_code: int) -> bool:
+        """
+        判断是否是数字键盘按键
+        
+        Args:
+            vk_code: Windows虚拟键码
+            
+        Returns:
+            bool: 如果是数字键盘按键返回 True
+        """
+        return VK_NUMPAD0 <= vk_code <= VK_NUMPAD9
+    
     def _send_key_input(self, vk_code: int, key_down: bool):
         """
         使用Windows API SendInput发送按键事件
@@ -179,17 +223,39 @@ class InputController:
             vk_code: Windows虚拟键码
             key_down: True表示按下，False表示释放
         """
-        flags = 0 if key_down else KEYEVENTF_KEYUP
+        # 判断是否是数字键盘按键
+        is_numpad = self._is_numpad_key(vk_code)
         
-        # 创建输入结构
-        extra = ctypes.c_ulong(0)
-        ki = KEYBDINPUT(
-            wVk=wintypes.WORD(vk_code),
-            wScan=wintypes.WORD(0),
-            dwFlags=wintypes.DWORD(flags),
-            time=wintypes.DWORD(0),
-            dwExtraInfo=ctypes.pointer(extra),
-        )
+        if is_numpad:
+            # 对于数字键盘按键，使用扫描码模式以确保游戏能正确识别
+            # 获取扫描码
+            scan_code = MapVirtualKey(vk_code, MAPVK_VK_TO_VSC)
+            flags = KEYEVENTF_SCANCODE
+            if not key_down:
+                flags |= KEYEVENTF_KEYUP
+            
+            # 创建输入结构（使用扫描码模式时，wVk 应设为 0）
+            extra = ctypes.c_ulong(0)
+            ki = KEYBDINPUT(
+                wVk=wintypes.WORD(0),
+                wScan=wintypes.WORD(scan_code),
+                dwFlags=wintypes.DWORD(flags),
+                time=wintypes.DWORD(0),
+                dwExtraInfo=ctypes.pointer(extra),
+            )
+        else:
+            # 对于其他按键，使用虚拟键码模式
+            flags = 0 if key_down else KEYEVENTF_KEYUP
+            
+            # 创建输入结构
+            extra = ctypes.c_ulong(0)
+            ki = KEYBDINPUT(
+                wVk=wintypes.WORD(vk_code),
+                wScan=wintypes.WORD(0),
+                dwFlags=wintypes.DWORD(flags),
+                time=wintypes.DWORD(0),
+                dwExtraInfo=ctypes.pointer(extra),
+            )
         
         union = INPUT_UNION(ki=ki)
         x = INPUT(
