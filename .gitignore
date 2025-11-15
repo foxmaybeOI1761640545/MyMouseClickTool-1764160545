@@ -8,3 +8,6 @@
 # PyCharm
 .idea/
 __pycache__/
+
+# Config file
+config.json
