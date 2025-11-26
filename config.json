@@ -1,9 +1,10 @@
 {
   "strings": [
     {
-      "text": "Y8",
-      "interval_ms": 10
+      "text": "Y4",
+      "interval_ms": 1
     }
   ],
-  "char_interval_ms": 10
+  "char_interval_ms": 1,
+  "hotkey": "p"
 }
