@@ -15,7 +15,8 @@ class ConfigManager:
         self.config_file = config_file
         self.default_config = {
             "strings": [],
-            "char_interval_ms": 100
+            "char_interval_ms": 100,
+            "hotkey": "f1"
         }
     
     def _migrate_old_config(self, config: dict) -> dict:
@@ -45,6 +46,8 @@ class ConfigManager:
             config["strings"] = []
         if "char_interval_ms" not in config:
             config["char_interval_ms"] = 1
+        if "hotkey" not in config:
+            config["hotkey"] = "f1"
         return config
     
     def load_config(self) -> dict:
@@ -71,17 +74,19 @@ class ConfigManager:
         else:
             return self.default_config.copy()
     
-    def save_config(self, strings: list, char_interval_ms: int):
+    def save_config(self, strings: list, char_interval_ms: int, hotkey: str = "f1"):
         """
         保存配置到文件
         
         Args:
             strings: 字符串列表，每个元素为 {"text": str, "interval_ms": int}
             char_interval_ms: 字符间隔（毫秒）
+            hotkey: 快捷键字符串，默认为 "f1"
         """
         config = {
             "strings": strings,
-            "char_interval_ms": char_interval_ms
+            "char_interval_ms": char_interval_ms,
+            "hotkey": hotkey
         }
         try:
             with open(self.config_file, 'w', encoding='utf-8') as f:
