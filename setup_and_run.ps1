@@ -68,4 +68,3 @@ if ($exitCode -ne 0) {
 Write-Host ""
 Read-Host "程序已退出，按 Enter 键关闭窗口"
 exit $exitCode
-

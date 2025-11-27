@@ -356,4 +356,3 @@ class InputController:
             # 所有字符串输入完成后，如果还在运行，继续循环
             if not self.running.is_set():
                 break
-

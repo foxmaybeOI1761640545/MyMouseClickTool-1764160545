@@ -56,4 +56,3 @@ class HotkeyListener:
         except AttributeError:
             # 处理特殊键
             pass
-
