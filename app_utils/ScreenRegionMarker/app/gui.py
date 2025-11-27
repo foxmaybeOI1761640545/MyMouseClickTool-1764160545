@@ -102,6 +102,13 @@ class ScreenRegionMarkerApp:
         # _updating_geometry 用来避免我们主动调用 geometry 时反复触发 Configure 递归
         self._updating_geometry = False
 
+        # 鼠标捕获覆盖层相关状态（红点替代鼠标箭头）
+        self._capture_overlay: tk.Toplevel | None = None
+        self._capture_canvas: tk.Canvas | None = None
+        self._capture_dot_id: int | None = None
+        self._capture_point_callback = None
+        self._capture_cancel_callback = None
+
         # 绑定窗口配置变化事件
         self.root.bind("<Configure>", self._on_root_configure)
 
@@ -138,23 +145,22 @@ class ScreenRegionMarkerApp:
         single_frame = ttk.LabelFrame(main_frame, text="获取指定位置坐标（单点）", padding=10)
         single_frame.pack(fill=tk.X, pady=5)
 
-        ttk.Label(single_frame, text="当前单点坐标：").grid(row=0, column=0, sticky=tk.W)
-        ttk.Label(single_frame, textvariable=self.single_point_var).grid(
-            row=0,
-            column=1,
-            sticky=tk.W,
-        )
+        # 使用一行内部小容器，避免“当前单点坐标”和坐标值之间出现过长间隔
+        coord_line = ttk.Frame(single_frame)
+        coord_line.grid(row=0, column=0, columnspan=2, sticky=tk.W)
+        ttk.Label(coord_line, text="当前单点坐标：").pack(side=tk.LEFT)
+        ttk.Label(coord_line, textvariable=self.single_point_var).pack(side=tk.LEFT)
 
         self.btn_capture_single = ttk.Button(
             single_frame,
-            text="捕获单点坐标（3秒后）",
+            text="捕获单点坐标",
             command=self.capture_single_point,
         )
         self.btn_capture_single.grid(row=1, column=0, columnspan=2, pady=5, sticky=tk.W)
 
         ttk.Label(
             single_frame,
-            text="提示：点击按钮后，3 秒内将鼠标移动到你想要获取的屏幕位置。",
+            text="提示：点击按钮后，用鼠标左键单击需要获取坐标的位置（按 Esc 取消）。",
             foreground="gray",
         ).grid(row=2, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
@@ -197,7 +203,7 @@ class ScreenRegionMarkerApp:
 
         ttk.Label(
             range_frame,
-            text="提示：先捕获左上角（或任意一角），再捕获对角位置。",
+            text="提示：先用左键单击选择范围一角（建议左上角），再单击选择对角位置。",
             foreground="gray",
         ).grid(row=4, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
 
@@ -336,6 +342,7 @@ class ScreenRegionMarkerApp:
             command=self.apply_window_settings,
         ).grid(row=0, column=4, rowspan=2, sticky=tk.NW, padx=(10, 0))
 
+        # 调整 wraplength=700，根据控件实际可用宽度自动换行，避免文本显示不全或者超出边界
         ttk.Label(
             settings_frame,
             text=(
@@ -343,7 +350,7 @@ class ScreenRegionMarkerApp:
                 " 如需调整，请修改参数后再次保存。"
             ),
             foreground="gray",
-            wraplength=500,
+            wraplength=700,
         ).grid(row=2, column=0, columnspan=5, sticky=tk.W, pady=(8, 0))
 
         # 状态栏
@@ -359,92 +366,202 @@ class ScreenRegionMarkerApp:
         # 初始化下拉框
         self.refresh_region_list()
 
-    # ---------------- 功能逻辑 ---------------- #
+    # ---------------- 公共工具方法 ---------------- #
 
     def set_status(self, text: str):
         self.status_var.set(text)
+
+    # --- 鼠标捕获辅助：在全屏透明覆盖层中用红点代替鼠标箭头 --- #
+
+    def _end_mouse_capture(self, cancelled: bool = False):
+        """
+        结束当前的鼠标捕获会话，销毁覆盖层并回调取消逻辑。
+        """
+        if self._capture_overlay is not None:
+            try:
+                self._capture_overlay.destroy()
+            except tk.TclError:
+                pass
+
+        self._capture_overlay = None
+        self._capture_canvas = None
+        self._capture_dot_id = None
+
+        if cancelled and self._capture_cancel_callback:
+            cb = self._capture_cancel_callback
+            self._capture_cancel_callback = None
+            self._capture_point_callback = None
+            cb()
+        else:
+            self._capture_cancel_callback = None
+            self._capture_point_callback = None
+
+    def _start_mouse_capture(self, on_point_captured, on_cancel=None):
+        """
+        启动一次鼠标坐标捕获：创建一个覆盖整个屏幕的透明窗口，
+        隐藏系统鼠标指针，并用一个跟随鼠标移动的红点进行提示。
+        左键单击时记录当前屏幕坐标并调用回调，Esc 取消。
+        """
+        # 若已有捕获会话，则先结束
+        if self._capture_overlay is not None:
+            self._end_mouse_capture(cancelled=True)
+
+        self._capture_point_callback = on_point_captured
+        self._capture_cancel_callback = on_cancel
+
+        overlay = tk.Toplevel(self.root)
+        self._capture_overlay = overlay
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+
+        # 覆盖整个主显示屏
+        screen_w = overlay.winfo_screenwidth()
+        screen_h = overlay.winfo_screenheight()
+        overlay.geometry(f"{screen_w}x{screen_h}+0+0")
+
+        # 使用透明色，让背景完全透明，只显示红点
+        try:
+            overlay.configure(bg="#ff00ff")
+            overlay.attributes("-transparentcolor", "#ff00ff")
+        except tk.TclError:
+            # 某些平台可能不支持 transparentcolor，就退化为近乎透明的窗口
+            overlay.configure(bg="black")
+            try:
+                overlay.attributes("-alpha", 0.01)
+            except tk.TclError:
+                pass
+
+        overlay.config(cursor="none")
+
+        canvas = tk.Canvas(
+            overlay,
+            bg=overlay["bg"],
+            highlightthickness=0,
+            bd=0,
+        )
+        canvas.pack(fill=tk.BOTH, expand=True)
+        self._capture_canvas = canvas
+
+        dot_radius = 5
+        dot = canvas.create_oval(0, 0, 0, 0, fill="red", outline="red")
+        self._capture_dot_id = dot
+
+        def update_dot(x: int, y: int):
+            r = dot_radius
+            canvas.coords(dot, x - r, y - r, x + r, y + r)
+
+        def on_motion(event):
+            # event.x / y 是在当前窗口内的坐标（即屏幕坐标）
+            update_dot(event.x, event.y)
+
+        def on_click(event):
+            if self._capture_point_callback:
+                cb = self._capture_point_callback
+                self._capture_point_callback = None  # 防止重复调用
+                # 使用全局坐标（相对于屏幕）
+                x, y = event.x_root, event.y_root
+                self._end_mouse_capture(cancelled=False)
+                cb(x, y)
+            else:
+                self._end_mouse_capture(cancelled=False)
+
+        def on_escape(event):
+            self._end_mouse_capture(cancelled=True)
+
+        canvas.bind("<Motion>", on_motion)
+        overlay.bind("<Motion>", on_motion)
+        overlay.bind("<Button-1>", on_click)
+        overlay.bind("<Escape>", on_escape)
+
+        # 初始时将红点放在当前鼠标位置
+        try:
+            x0, y0 = pyautogui.position()
+            # 将屏幕坐标转换为窗口内部坐标（这里窗口从 0,0 开始覆盖全屏，所以相同）
+            update_dot(x0, y0)
+        except Exception:
+            pass
+
+    # ---------------- 功能逻辑 ---------------- #
 
     # --- 单点捕获 --- #
 
     def capture_single_point(self):
         """
-        捕获单点坐标（3 秒倒计时）
+        通过一次鼠标左键单击捕获单点坐标。
         """
-        self.set_status("单点捕获即将开始，请在 3 秒内将鼠标移动到目标位置。")
+        self.set_status("单点捕获：请用鼠标左键单击要获取坐标的位置，按 Esc 取消。")
         self.btn_capture_single.config(state=tk.DISABLED)
-        self._single_point_countdown(3)
 
-    def _single_point_countdown(self, seconds_left: int):
-        if seconds_left > 0:
-            self.set_status(
-                f"将在 {seconds_left} 秒后捕获单点坐标，请把鼠标移动到目标位置。"
-            )
-            self.root.after(1000, self._single_point_countdown, seconds_left - 1)
-        else:
-            # 倒计时结束，读取鼠标位置
-            x, y = pyautogui.position()
+        def on_point(x: int, y: int):
             self.single_point_var.set(f"({x}, {y})")
             self.set_status(f"单点坐标已捕获：({x}, {y})")
             self.btn_capture_single.config(state=tk.NORMAL)
+
+        def on_cancel():
+            self.set_status("单点捕获已取消。")
+            self.btn_capture_single.config(state=tk.NORMAL)
+
+        self._start_mouse_capture(on_point_captured=on_point, on_cancel=on_cancel)
 
     # --- 范围捕获 --- #
 
     def capture_range(self):
         """
-        分两次捕获范围：第一点和第二点
+        通过两次鼠标左键单击捕获范围：第一点和第二点。
         """
-        self.set_status(
-            "范围捕获即将开始，先捕获第一点（如左上角）。3 秒内移动鼠标到第一点。"
-        )
+        self.set_status("范围捕获：请先用鼠标左键单击选择第一点（如左上角），按 Esc 取消。")
         self.btn_capture_range.config(state=tk.DISABLED)
-        self.range_step1_var.set("第一点：准备捕获中…")
+        self.range_step1_var.set("第一点：等待捕获…")
         self.range_step2_var.set("第二点：未捕获")
         self.range_result_var.set("范围：未计算")
         self._range_first_point = None  # 内部记录第一点
-        self._range_countdown_first(3)
 
-    def _range_countdown_first(self, seconds_left: int):
-        if seconds_left > 0:
-            self.set_status(
-                f"将在 {seconds_left} 秒后捕获第一点，请移动鼠标到范围的一角（建议左上角）。"
-            )
-            self.root.after(1000, self._range_countdown_first, seconds_left - 1)
-        else:
-            x1, y1 = pyautogui.position()
+        def on_first_cancel():
+            self.set_status("范围捕获已取消。")
+            self.range_step1_var.set("第一点：未捕获")
+            self.btn_capture_range.config(state=tk.NORMAL)
+
+        def on_first_point(x1: int, y1: int):
             self._range_first_point = (x1, y1)
             self.range_step1_var.set(f"第一点：({x1}, {y1})")
             self.set_status(
-                "第一点已捕获，请在 3 秒内移动鼠标到对角位置（如右下角），将捕获第二点。"
+                "第一点已捕获，请用鼠标左键单击选择第二点（对角位置），按 Esc 取消。"
             )
-            self._range_countdown_second(3)
 
-    def _range_countdown_second(self, seconds_left: int):
-        if seconds_left > 0:
-            self.set_status(
-                f"将在 {seconds_left} 秒后捕获第二点，请移动鼠标到范围的对角位置。({seconds_left})"
-            )
-            self.root.after(1000, self._range_countdown_second, seconds_left - 1)
-        else:
-            x2, y2 = pyautogui.position()
-            self.range_step2_var.set(f"第二点：({x2}, {y2})")
-
-            if self._range_first_point is None:
-                self.set_status("第一点丢失，范围捕获失败，请重试。")
+            def on_second_cancel():
+                self.set_status("范围捕获已取消。")
                 self.btn_capture_range.config(state=tk.NORMAL)
-                return
 
-            x1, y1 = self._range_first_point
-            # 临时名称，真正保存时用户会填写
-            temp_name = self.range_name_var.get().strip() or "未命名范围"
-            region = create_region_from_points(temp_name, x1, y1, x2, y2)
-            self.current_region = region
+            def on_second_point(x2: int, y2: int):
+                self.range_step2_var.set(f"第二点：({x2}, {y2})")
 
-            self.range_result_var.set(
-                f"范围：left={region.left}, top={region.top}, "
-                f"width={region.width}, height={region.height}"
+                if self._range_first_point is None:
+                    self.set_status("第一点丢失，范围捕获失败，请重试。")
+                    self.btn_capture_range.config(state=tk.NORMAL)
+                    return
+
+                fx, fy = self._range_first_point
+                # 临时名称，真正保存时用户会填写
+                temp_name = self.range_name_var.get().strip() or "未命名范围"
+                region = create_region_from_points(temp_name, fx, fy, x2, y2)
+                self.current_region = region
+
+                self.range_result_var.set(
+                    f"范围：left={region.left}, top={region.top}, "
+                    f"width={region.width}, height={region.height}"
+                )
+                self.set_status("范围已捕获，可为其命名并点击“保存当前范围”。")
+                self.btn_capture_range.config(state=tk.NORMAL)
+
+            self._start_mouse_capture(
+                on_point_captured=on_second_point,
+                on_cancel=on_second_cancel,
             )
-            self.set_status("范围已捕获，可为其命名并点击“保存当前范围”。")
-            self.btn_capture_range.config(state=tk.NORMAL)
+
+        self._start_mouse_capture(
+            on_point_captured=on_first_point,
+            on_cancel=on_first_cancel,
+        )
 
     # --- 保存 / 加载范围 --- #
 
