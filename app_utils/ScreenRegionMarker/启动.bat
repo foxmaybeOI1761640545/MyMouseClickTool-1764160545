@@ -1,5 +1,6 @@
 @echo off
 chcp 65001 >nul
+mode con: cols=15 lines=3
 cd /d "%~dp0"
 
 echo ========================================

@@ -102,10 +102,10 @@ class ScreenRegionMarkerApp:
         # _updating_geometry 用来避免我们主动调用 geometry 时反复触发 Configure 递归
         self._updating_geometry = False
 
-        # 鼠标捕获覆盖层相关状态（红点替代鼠标箭头）
+        # 鼠标捕获覆盖层相关状态（红色十字准星替代鼠标箭头）
         self._capture_overlay: tk.Toplevel | None = None
         self._capture_canvas: tk.Canvas | None = None
-        self._capture_dot_id: int | None = None
+        self._capture_dot_id: int | None = None  # 保留字段，当前用于记录圆点图元
         self._capture_point_callback = None
         self._capture_cancel_callback = None
 
@@ -371,13 +371,18 @@ class ScreenRegionMarkerApp:
     def set_status(self, text: str):
         self.status_var.set(text)
 
-    # --- 鼠标捕获辅助：在全屏透明覆盖层中用红点代替鼠标箭头 --- #
+    # --- 鼠标捕获辅助：在全屏透明覆盖层中用十字准星代替鼠标箭头 --- #
 
     def _end_mouse_capture(self, cancelled: bool = False):
         """
         结束当前的鼠标捕获会话，销毁覆盖层并回调取消逻辑。
         """
         if self._capture_overlay is not None:
+            try:
+                # 若有全局抓取，先释放
+                self._capture_overlay.grab_release()
+            except tk.TclError:
+                pass
             try:
                 self._capture_overlay.destroy()
             except tk.TclError:
@@ -399,7 +404,7 @@ class ScreenRegionMarkerApp:
     def _start_mouse_capture(self, on_point_captured, on_cancel=None):
         """
         启动一次鼠标坐标捕获：创建一个覆盖整个屏幕的透明窗口，
-        隐藏系统鼠标指针，并用一个跟随鼠标移动的红点进行提示。
+        隐藏系统鼠标指针，并用一个跟随鼠标移动的红色十字准星进行提示。
         左键单击时记录当前屏幕坐标并调用回调，Esc 取消。
         """
         # 若已有捕获会话，则先结束
@@ -419,7 +424,7 @@ class ScreenRegionMarkerApp:
         screen_h = overlay.winfo_screenheight()
         overlay.geometry(f"{screen_w}x{screen_h}+0+0")
 
-        # 使用透明色，让背景完全透明，只显示红点
+        # 使用透明色，让背景完全透明，只显示红色十字准星
         try:
             overlay.configure(bg="#ff00ff")
             overlay.attributes("-transparentcolor", "#ff00ff")
@@ -431,6 +436,7 @@ class ScreenRegionMarkerApp:
             except tk.TclError:
                 pass
 
+        # 隐藏系统鼠标指针
         overlay.config(cursor="none")
 
         canvas = tk.Canvas(
@@ -442,17 +448,27 @@ class ScreenRegionMarkerApp:
         canvas.pack(fill=tk.BOTH, expand=True)
         self._capture_canvas = canvas
 
-        dot_radius = 5
+        # 使用更精确的准星：中心小圆点 + 十字线，中心交点即为捕获的像素点
+        DOT_RADIUS = 3  # 原来为 5，减小半径便于精确定位
+        CROSS_HALF = 10  # 十字线从中心向四周延伸的长度
+
         dot = canvas.create_oval(0, 0, 0, 0, fill="red", outline="red")
+        h_line = canvas.create_line(0, 0, 0, 0, fill="red")
+        v_line = canvas.create_line(0, 0, 0, 0, fill="red")
         self._capture_dot_id = dot
 
-        def update_dot(x: int, y: int):
-            r = dot_radius
+        def update_marker(x: int, y: int):
+            """
+            更新十字准星的位置。传入的 (x, y) 即为将要捕获的坐标。
+            """
+            r = DOT_RADIUS
             canvas.coords(dot, x - r, y - r, x + r, y + r)
+            canvas.coords(h_line, x - CROSS_HALF, y, x + CROSS_HALF, y)
+            canvas.coords(v_line, x, y - CROSS_HALF, x, y + CROSS_HALF)
 
         def on_motion(event):
             # event.x / y 是在当前窗口内的坐标（即屏幕坐标）
-            update_dot(event.x, event.y)
+            update_marker(event.x, event.y)
 
         def on_click(event):
             if self._capture_point_callback:
@@ -471,15 +487,49 @@ class ScreenRegionMarkerApp:
         canvas.bind("<Motion>", on_motion)
         overlay.bind("<Motion>", on_motion)
         overlay.bind("<Button-1>", on_click)
-        overlay.bind("<Escape>", on_escape)
+        overlay.bind("<Key-Escape>", on_escape)
 
-        # 初始时将红点放在当前鼠标位置
+        # 让覆盖层获得键盘焦点并捕获所有输入，保证 Esc 可以生效
+        try:
+            overlay.focus_force()
+        except tk.TclError:
+            pass
+        try:
+            overlay.grab_set()
+        except tk.TclError:
+            pass
+
+        # 初始时将十字准星放在当前鼠标位置
         try:
             x0, y0 = pyautogui.position()
-            # 将屏幕坐标转换为窗口内部坐标（这里窗口从 0,0 开始覆盖全屏，所以相同）
-            update_dot(x0, y0)
+            update_marker(x0, y0)
         except Exception:
             pass
+
+        # 额外使用轮询方式跟踪系统鼠标位置，避免快速移动时红点与鼠标脱节
+        def track_cursor():
+            # 如果此次调用对应的 overlay 已经不存在，则停止轮询
+            if self._capture_overlay is not overlay:
+                return
+            try:
+                if not overlay.winfo_exists():
+                    return
+            except tk.TclError:
+                return
+
+            try:
+                x, y = pyautogui.position()
+                update_marker(x, y)
+            except Exception:
+                pass
+
+            # 10ms 更新一次，跟随实际鼠标位置
+            try:
+                overlay.after(10, track_cursor)
+            except tk.TclError:
+                pass
+
+        track_cursor()
 
     # ---------------- 功能逻辑 ---------------- #
 
@@ -690,7 +740,7 @@ class ScreenRegionMarkerApp:
         overlay.bind("<Escape>", lambda e: overlay.destroy())
         overlay.after(2000, overlay.destroy)
 
-        self.set_status(f"已在屏幕上高亮显示范围“{name}”（点击红框或 2 秒后自动关闭）。")
+        self.set_status(f"已在屏幕上高亮显示范围“【name】”（点击红框或 2 秒后自动关闭）。")
 
     def delete_selected_region(self):
         """
