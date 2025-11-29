@@ -1,19 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-backend.py - WaveNumberOCR 后端逻辑
+backend.py - WaveNumberOCR 后端逻辑（EasyOCR 版）
 
 负责：
 - 根据屏幕坐标截取指定区域图像
-- 调用 OCR 引擎识别文字
+- 调用 EasyOCR 识别文字
 - 从识别结果中解析出 “第…波” 中间的阿拉伯数字
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, List
 import re
 
 import mss
 from PIL import Image
-import pytesseract
+import numpy as np
+import easyocr
 
 
 class ScreenCaptureError(Exception):
@@ -27,17 +28,20 @@ class ScreenTextRecognizer:
     - 截取屏幕指定区域
     - OCR 识别
     - 解析 “第X波” 中的 X（阿拉伯数字）
+
+    使用 EasyOCR，不再依赖外部 Tesseract 可执行程序。
     """
 
-    def __init__(self, tesseract_cmd: Optional[str] = None, ocr_lang: str = "chi_sim+eng"):
+    def __init__(self, languages: Optional[List[str]] = None, gpu: bool = False):
         """
-        :param tesseract_cmd: 可选，Tesseract 可执行文件的完整路径。
-                              如果已加入 PATH，可留空。
-        :param ocr_lang: OCR 语言设置，默认中文简体 + 英文 + 数字。
+        :param languages: OCR 语言列表，默认 ['ch_sim', 'en']（简体中文 + 英文）
+        :param gpu: 是否使用 GPU，默认 False（纯 CPU 即可）
         """
-        if tesseract_cmd:
-            pytesseract.pytesseract.tesseract_cmd = tesseract_cmd
-        self.ocr_lang = ocr_lang
+        if languages is None:
+            languages = ["ch_sim", "en"]
+
+        # 初始化 EasyOCR 的 Reader（比较耗时，建议整个程序只初始化一次）
+        self.reader = easyocr.Reader(languages, gpu=gpu)
 
     @staticmethod
     def normalize_box(x1: int, y1: int, x2: int, y2: int) -> Tuple[int, int, int, int]:
@@ -76,12 +80,20 @@ class ScreenTextRecognizer:
 
     def ocr_text(self, image: Image.Image) -> str:
         """
-        对图像执行 OCR，返回识别出的文本。
+        对图像执行 OCR，返回识别出的文本（用换行拼成一个字符串）。
+        使用 EasyOCR 的 reader.readtext。
         """
         if image.mode != "RGB":
             image = image.convert("RGB")
 
-        text = pytesseract.image_to_string(image, lang=self.ocr_lang)
+        # EasyOCR 接受 numpy 数组
+        np_img = np.array(image)
+
+        # detail=0 只返回文字列表，如 ["第3波", "其它字..."]
+        results = self.reader.readtext(np_img, detail=0)
+
+        # 将所有识别结果拼成一个长文本，方便后面用正则匹配
+        text = "\n".join(results)
         return text
 
     @staticmethod
