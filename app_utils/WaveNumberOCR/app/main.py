@@ -19,7 +19,7 @@ def main() -> None:
     # recognizer = ScreenTextRecognizer(
     #     tesseract_cmd=r"C:\Program Files\Tesseract-OCR\tesseract.exe"
     # )
-    recognizer = ScreenTextRecognizer()
+    recognizer = ScreenTextRecognizer(debug=True)
 
     app = WaveNumberApp(recognizer)
     app.run()
