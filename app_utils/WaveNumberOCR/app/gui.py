@@ -19,6 +19,15 @@ from PIL import ImageTk  # 用于在 Tk 窗口中显示 PIL 图像
 from backend import ScreenTextRecognizer, ScreenCaptureError
 
 
+# ----------------- 默认坐标（图示坐标）-----------------
+# 这里填的是你现在截图示例中使用的那组坐标：
+# 左上：(800, 250)，右下：(1080, 350)
+DEFAULT_X1 = 800
+DEFAULT_Y1 = 250
+DEFAULT_X2 = 1080
+DEFAULT_Y2 = 350
+
+
 class WaveNumberApp:
     """
     WaveNumberOCR 主界面类。
@@ -71,6 +80,12 @@ class WaveNumberApp:
         ttk.Label(coord_frame, text="右下 Y：").grid(row=1, column=2, sticky="e", **pad)
         self.entry_y2 = ttk.Entry(coord_frame, width=10)
         self.entry_y2.grid(row=1, column=3, **pad)
+
+        # —— 新增：初始化坐标为默认图示值 ——
+        self.entry_x1.insert(0, str(DEFAULT_X1))
+        self.entry_y1.insert(0, str(DEFAULT_Y1))
+        self.entry_x2.insert(0, str(DEFAULT_X2))
+        self.entry_y2.insert(0, str(DEFAULT_Y2))
 
         # 按钮区
         btn_frame = ttk.Frame(main_frame)
@@ -158,6 +173,7 @@ class WaveNumberApp:
         """
         在屏幕上用半透明红色矩形高亮显示用户输入的坐标区域。
         这是一个独立的无边框顶层窗口。
+        现在改为：显示 3 秒后自动隐藏。
         """
         try:
             x1, y1, x2, y2 = self._get_coords_from_entries()
@@ -185,6 +201,17 @@ class WaveNumberApp:
         self._overlay_window.geometry(f"{width}x{height}+{left}+{top}")
         self._overlay_window.deiconify()
         self._overlay_window.lift()
+
+        # —— 新增：3 秒后自动隐藏高亮窗口 ——
+        self.root.after(3000, self._hide_overlay)
+
+    def _hide_overlay(self) -> None:
+        """
+        隐藏高亮窗口（如果存在）。
+        使用 withdraw 而不是 destroy，这样下次还能复用。
+        """
+        if self._overlay_window is not None and self._overlay_window.winfo_exists():
+            self._overlay_window.withdraw()
 
     def _on_recognize(self) -> None:
         """
