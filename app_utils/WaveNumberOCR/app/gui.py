@@ -10,11 +10,14 @@ gui.py - WaveNumberOCR 图形界面
 """
 
 from typing import Tuple, Optional
+import threading
+import time
 
 import tkinter as tk
 from tkinter import ttk, messagebox
 
 from PIL import ImageTk  # 用于在 Tk 窗口中显示 PIL 图像
+import keyboard  # 全局快捷键
 
 from backend import ScreenTextRecognizer, ScreenCaptureError
 
@@ -42,13 +45,32 @@ class WaveNumberApp:
 
         # 用于显示识别结果
         self.result_var = tk.StringVar(value="识别结果：尚未识别")
+        # 用于显示高亮倒计时
+        self.highlight_countdown_var = tk.StringVar(value="")
+        self._highlight_remaining: int = 0
+        self._highlight_timer_id: Optional[str] = None
 
         # 存放覆盖矩形窗口和预览窗口的引用（便于更新/关闭）
         self._overlay_window: Optional[tk.Toplevel] = None
         self._preview_window: Optional[tk.Toplevel] = None
         self._preview_photo: Optional[ImageTk.PhotoImage] = None
+        self._preview_label: Optional[ttk.Label] = None
+
+        # 连续识别相关状态
+        self._recognizing: bool = False
+        self._recognize_thread: Optional[threading.Thread] = None
+        self._recognize_seconds: int = 0
+        self._recognize_coords: Optional[Tuple[int, int, int, int]] = None
 
         self._build_ui()
+
+        # 固定一个最小窗口大小，避免点击按钮后窗口被自动缩小
+        self.root.update_idletasks()
+        self.root.minsize(self.root.winfo_width(), self.root.winfo_height())
+
+        # 注册全局快捷键 Ctrl+Q，用于开始/暂停连续识别
+        self._register_hotkeys()
+
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ----------------- UI 构建 -----------------
@@ -81,7 +103,7 @@ class WaveNumberApp:
         self.entry_y2 = ttk.Entry(coord_frame, width=10)
         self.entry_y2.grid(row=1, column=3, **pad)
 
-        # —— 新增：初始化坐标为默认图示值 ——
+        # —— 初始化坐标为默认图示值 ——
         self.entry_x1.insert(0, str(DEFAULT_X1))
         self.entry_y1.insert(0, str(DEFAULT_Y1))
         self.entry_x2.insert(0, str(DEFAULT_X2))
@@ -91,21 +113,25 @@ class WaveNumberApp:
         btn_frame = ttk.Frame(main_frame)
         btn_frame.grid(row=1, column=0, sticky="ew", **pad)
 
-        btn_preview = ttk.Button(btn_frame, text="预览选区（截图）", command=self._on_preview_region)
+        btn_preview = ttk.Button(btn_frame, text="预览选区截图", command=self._on_preview_region)
         btn_preview.grid(row=0, column=0, **pad)
 
         btn_highlight = ttk.Button(btn_frame, text="高亮显示选区", command=self._on_highlight_region)
         btn_highlight.grid(row=0, column=1, **pad)
 
-        btn_recognize = ttk.Button(btn_frame, text="开始识别“第X波”", command=self._on_recognize)
-        btn_recognize.grid(row=0, column=2, **pad)
+        self.btn_recognize = ttk.Button(btn_frame, text="开始识别关卡", command=self._on_recognize)
+        self.btn_recognize.grid(row=0, column=2, **pad)
 
-        btn_quit = ttk.Button(btn_frame, text="退出", command=self._on_close)
+        btn_quit = ttk.Button(btn_frame, text="退出当前程序", command=self._on_close)
         btn_quit.grid(row=0, column=3, **pad)
+
+        # 高亮倒计时显示
+        highlight_label = ttk.Label(main_frame, textvariable=self.highlight_countdown_var, foreground="darkred")
+        highlight_label.grid(row=2, column=0, sticky="w", **pad)
 
         # 结果显示
         result_label = ttk.Label(main_frame, textvariable=self.result_var, foreground="blue")
-        result_label.grid(row=2, column=0, sticky="w", **pad)
+        result_label.grid(row=3, column=0, sticky="w", **pad)
 
         # 提示
         hint_label = ttk.Label(
@@ -113,7 +139,20 @@ class WaveNumberApp:
             text="提示：坐标为屏幕像素，左上角大致为 (0, 0)，向右为 X+，向下为 Y+。",
             foreground="gray"
         )
-        hint_label.grid(row=3, column=0, sticky="w", **pad)
+        hint_label.grid(row=4, column=0, sticky="w", **pad)
+
+    # ----------------- 全局快捷键 -----------------
+
+    def _register_hotkeys(self) -> None:
+        """
+        注册全局快捷键 Ctrl+Q，触发与按钮“开始识别‘第X波’”相同的逻辑。
+        使用 keyboard 库，在后台线程中监听按键，再通过 Tk 的 after 回到主线程。
+        """
+        try:
+            keyboard.add_hotkey("ctrl+q", lambda: self.root.after(0, self._on_recognize))
+            print("已注册全局快捷键：Ctrl+Q 用于开始/暂停连续识别。")
+        except Exception as exc:  # pylint: disable=broad-except
+            print(f"注册全局快捷键失败：{exc}")
 
     # ----------------- 事件处理 -----------------
 
@@ -138,6 +177,7 @@ class WaveNumberApp:
     def _on_preview_region(self) -> None:
         """
         预览选区：截取屏幕指定区域并在弹出窗口中显示截图。
+        多次点击时只保留最新的一张截图，避免累积多个截图控件。
         """
         try:
             coords = self._get_coords_from_entries()
@@ -151,20 +191,23 @@ class WaveNumberApp:
             messagebox.showerror("截屏失败", str(exc), parent=self.root)
             return
 
-        # 若之前有预览窗口，复用/更新之
+        # 若之前有预览窗口，则复用；否则新建
         if self._preview_window is None or not self._preview_window.winfo_exists():
             self._preview_window = tk.Toplevel(self.root)
             self._preview_window.title("选区预览")
+            self._preview_label = ttk.Label(self._preview_window)
+            self._preview_label.pack()
         else:
             self._preview_window.deiconify()
             self._preview_window.lift()
+            if self._preview_label is None or not self._preview_label.winfo_exists():
+                self._preview_label = ttk.Label(self._preview_window)
+                self._preview_label.pack()
 
-        # 将 PIL Image 转为 PhotoImage
+        # 将 PIL Image 转为 PhotoImage，并更新到同一个 Label 上
         self._preview_photo = ImageTk.PhotoImage(img)
-
-        label = ttk.Label(self._preview_window, image=self._preview_photo)
-        label.image = self._preview_photo  # 防止被垃圾回收
-        label.pack()
+        self._preview_label.configure(image=self._preview_photo)
+        self._preview_label.image = self._preview_photo  # 防止被垃圾回收
 
         # 根据图像大小调整窗口大小
         self._preview_window.geometry(f"{img.width}x{img.height}")
@@ -173,7 +216,7 @@ class WaveNumberApp:
         """
         在屏幕上用半透明红色矩形高亮显示用户输入的坐标区域。
         这是一个独立的无边框顶层窗口。
-        现在改为：显示 3 秒后自动隐藏。
+        新增：带 3 秒倒计时显示，倒计时结束后自动隐藏高亮。
         """
         try:
             x1, y1, x2, y2 = self._get_coords_from_entries()
@@ -202,8 +245,31 @@ class WaveNumberApp:
         self._overlay_window.deiconify()
         self._overlay_window.lift()
 
-        # —— 新增：3 秒后自动隐藏高亮窗口 ——
-        self.root.after(3000, self._hide_overlay)
+        # 取消之前的倒计时（如果有）
+        if self._highlight_timer_id is not None:
+            try:
+                self.root.after_cancel(self._highlight_timer_id)
+            except Exception:
+                pass
+            self._highlight_timer_id = None
+
+        # 开始新的 3 秒倒计时
+        self._highlight_remaining = 3
+        self._update_highlight_countdown()
+
+    def _update_highlight_countdown(self) -> None:
+        """
+        高亮倒计时更新：每秒更新一次显示，倒计时结束后隐藏高亮窗口。
+        """
+        if self._highlight_remaining <= 0:
+            self.highlight_countdown_var.set("")
+            self._hide_overlay()
+            self._highlight_timer_id = None
+            return
+
+        self.highlight_countdown_var.set(f"高亮剩余：{self._highlight_remaining} 秒")
+        self._highlight_remaining -= 1
+        self._highlight_timer_id = self.root.after(1000, self._update_highlight_countdown)
 
     def _hide_overlay(self) -> None:
         """
@@ -213,38 +279,107 @@ class WaveNumberApp:
         if self._overlay_window is not None and self._overlay_window.winfo_exists():
             self._overlay_window.withdraw()
 
+    # ----------------- 连续识别（多线程 + 日志） -----------------
+
     def _on_recognize(self) -> None:
         """
-        触发识别：截屏 + OCR + 解析 “第X波”。
-        在控制台打印结果，并在 GUI 中显示。
+        触发/暂停连续识别：
+        - 第一次触发时，读取当前坐标，启动后台线程每秒识别一次；
+        - 再次触发时，暂停识别；
+        - 可通过按钮点击或全局快捷键 Ctrl+Q 触发本方法。
         """
-        try:
-            coords = self._get_coords_from_entries()
-        except ValueError as exc:
-            messagebox.showerror("输入错误", str(exc), parent=self.root)
-            return
+        if not self._recognizing:
+            # 准备启动连续识别
+            try:
+                coords = self._get_coords_from_entries()
+            except ValueError as exc:
+                messagebox.showerror("输入错误", str(exc), parent=self.root)
+                return
 
-        try:
-            number = self.recognizer.capture_and_recognize(*coords)
-        except ScreenCaptureError as exc:
-            messagebox.showerror("截屏失败", str(exc), parent=self.root)
-            return
-        except Exception as exc:  # pylint: disable=broad-except
-            messagebox.showerror("识别失败", f"OCR 过程中出现错误：{exc}", parent=self.root)
-            return
+            self._recognizing = True
+            self._recognize_seconds = 0
+            self._recognize_coords = coords
+            self._update_recognize_button_text()
+            self.result_var.set("识别结果：开始连续识别（Ctrl+Q 可暂停）")
 
-        if number is None:
-            # 没有找到 "第…波" 模式，按需求返回 null
-            print("识别结果: null")
-            self.result_var.set("识别结果：null（未找到“第…波”模式）")
+            # 启动后台线程
+            self._recognize_thread = threading.Thread(
+                target=self._recognize_loop, daemon=True
+            )
+            self._recognize_thread.start()
         else:
-            print(f"识别结果: {number}")
-            self.result_var.set(f"识别结果：{number}")
+            # 暂停连续识别
+            self._recognizing = False
+            self._update_recognize_button_text()
+            self.result_var.set("识别结果：已暂停连续识别（Ctrl+Q 再次开始）")
+
+    def _update_recognize_button_text(self) -> None:
+        """
+        根据当前识别状态更新按钮文字。
+        """
+        if self._recognizing:
+            self.btn_recognize.configure(text="暂停识别关卡")
+        else:
+            self.btn_recognize.configure(text="开始识别关卡")
+
+    def _recognize_loop(self) -> None:
+        """
+        后台线程：每秒执行一次识别，直到 _recognizing 被置为 False。
+        识别日志以“第n秒: 内容”的形式输出到控制台。
+        """
+        assert self._recognize_coords is not None
+
+        while self._recognizing:
+            self._recognize_seconds += 1
+
+            try:
+                number = self.recognizer.capture_and_recognize(
+                    *self._recognize_coords
+                )
+                if number is None:
+                    content = "null"
+                    gui_text = "识别结果：null（未找到“第…波”模式）"
+                else:
+                    content = str(number)
+                    gui_text = f"识别结果：{number}"
+            except ScreenCaptureError as exc:
+                content = f"截屏失败：{exc}"
+                gui_text = f"识别结果：截屏失败：{exc}"
+            except Exception as exc:  # pylint: disable=broad-except
+                content = f"OCR 错误：{exc}"
+                gui_text = f"识别结果：OCR 错误：{exc}"
+
+            log_line = f"第{self._recognize_seconds}秒: {content}"
+            print(log_line)
+
+            # 更新 GUI 文本（回到主线程）
+            self.root.after(0, self._update_result_text, gui_text)
+
+            # 每秒执行一次识别，注意在等待期间检查停止标志
+            for _ in range(10):
+                if not self._recognizing:
+                    break
+                time.sleep(0.1)
+
+    def _update_result_text(self, text: str) -> None:
+        """
+        在主线程中更新识别结果显示。
+        """
+        self.result_var.set(text)
 
     def _on_close(self) -> None:
         """
         关闭主窗口及所有子窗口。
         """
+        # 停止连续识别线程
+        self._recognizing = False
+
+        # 清理全局快捷键
+        try:
+            keyboard.clear_all_hotkeys()
+        except Exception:
+            pass
+
         # 先关闭 overlay
         if self._overlay_window is not None and self._overlay_window.winfo_exists():
             self._overlay_window.destroy()
