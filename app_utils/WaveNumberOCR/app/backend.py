@@ -83,6 +83,26 @@ class ScreenTextRecognizer:
         img = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
         return img
 
+    def get_pixel_color(self, x: int, y: int) -> Tuple[int, int, int]:
+        """
+        获取屏幕上某个像素点的 RGB 颜色值。
+
+        :param x: 屏幕 X 坐标（像素）
+        :param y: 屏幕 Y 坐标（像素）
+        :return: (R, G, B)
+        :raises ScreenCaptureError: 截屏失败时抛出。
+        """
+        try:
+            with mss.mss() as sct:
+                monitor = {"left": int(x), "top": int(y), "width": 1, "height": 1}
+                sct_img = sct.grab(monitor)
+        except Exception as exc:  # pylint: disable=broad-except
+            raise ScreenCaptureError(f"获取像素颜色时截屏失败: {exc}") from exc
+
+        img = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
+        r, g, b = img.getpixel((0, 0))
+        return r, g, b
+
     # ------------ 图像预处理 + OCR ------------
 
     @staticmethod
