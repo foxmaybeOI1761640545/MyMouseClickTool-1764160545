@@ -98,7 +98,7 @@ class ScreenTextRecognizer:
         针对游戏中“黄字黑底”的关卡提示文本做预处理，提升 OCR 成功率：
 
         1. 放大 2~3 倍；
-        2. 根据日志中观察到的颜色 RGB(255, 214, 36) 做 “近似黄色” 颜色提取，
+        2. 根据观察到的颜色 RGB(255, 214, 36) 做 “近似黄色” 颜色提取，
            把接近该颜色的像素变成白色，其他像素变成黑色，得到黑底白字二值图；
         3. 自动对比度。
 
@@ -120,7 +120,7 @@ class ScreenTextRecognizer:
         g = arr[:, :, 1]
         b = arr[:, :, 2]
 
-        # 目标颜色：从你的调试日志中看到像素颜色约为 RGB(255, 214, 36)
+        # 目标颜色：约 RGB(255, 214, 36)（#FFD624）
         tr, tg, tb = 255, 214, 36
 
         # 计算每个像素与目标颜色的“距离”（L1 距离）
@@ -155,7 +155,7 @@ class ScreenTextRecognizer:
         np_img = np.array(image)
 
         # 限制识别字符范围，强行收缩到“第/波 + 数字/中文数字 + 常见误识别”
-        # 注意这里重新允许 I / l / | / O / o / 〇，方便后续归一化成 1 / 0
+        # 注意这里允许 I / l / | / O / o / 〇，方便后续归一化成 1 / 0
         allowlist = "第弟波坡0123456789零一二三四五六七八九十两Il|Oo〇 　"
 
         try:
@@ -191,7 +191,8 @@ class ScreenTextRecognizer:
         处理一些 OCR 常见误识别：
         - 把 I / l / | 视作数字 1
         - 把 O / o / 〇 视作数字 0
-        - 把连续空白压缩成一个普通空格，方便正则匹配并“排除空格的干扰”
+        - 把“坡”视作“波”（视觉上更接近原文）
+        - 把连续空白压缩成一个普通空格，避免空格干扰匹配
         """
         replacements = {
             "I": "1",
@@ -200,11 +201,12 @@ class ScreenTextRecognizer:
             "O": "0",
             "o": "0",
             "〇": "0",
+            "坡": "波",
         }
         for k, v in replacements.items():
             text = text.replace(k, v)
 
-        # 压缩所有空白为单个空格
+        # 压缩所有空白为单个空格（包括换行）
         text = re.sub(r"\s+", " ", text)
         return text
 
@@ -267,24 +269,30 @@ class ScreenTextRecognizer:
         从文本中解析 “第X波”，返回 X（阿拉伯数字字符串）。
         若未找到则返回 None。
         """
-        # 先做一次常见误识别归一化（包含 I/l/| -> 1、压缩空白）
+        # 先做一次常见误识别归一化（包含 I/l/| -> 1、O/o/〇 -> 0、坡 -> 波、压缩空白）
         normalized = cls._normalize_common_misread(text)
 
         # 1. 优先匹配阿拉伯数字形式：第 1 波
-        pattern_digit = re.compile(r"[第弟]\s*([0-9]{1,4})\s*[波坡]", re.DOTALL)
+        pattern_digit = re.compile(r"[第弟]\s*([0-9]{1,4})\s*波", re.DOTALL)
         match = pattern_digit.search(normalized)
         if match:
             return match.group(1)
 
         # 2. 兼容中文数字形式：第一波、第十二波 等
-        pattern_cn = re.compile(r"[第弟]\s*([零一二三四五六七八九十两]+)\s*[波坡]", re.DOTALL)
+        pattern_cn = re.compile(r"[第弟]\s*([零一二三四五六七八九十两]+)\s*波", re.DOTALL)
         match = pattern_cn.search(normalized)
         if match:
             num = cls._chinese_numeral_to_int(match.group(1))
             if num is not None:
                 return str(num)
 
-        # 3. 如果 “第…波” 结构没匹配上，但整段文本里只有一段数字，则直接返回这段数字
+        # 3. 特判：常见的“第  波”/“第 波”——中间完全空白，通常是“第1波”
+        #    例如当前日志中的 '第  坡' 经过归一化与压缩空格后就是 '第 波'
+        pattern_missing_digit = re.compile(r"[第弟]\s*波", re.DOTALL)
+        if pattern_missing_digit.search(normalized):
+            return "1"
+
+        # 4. 如果 “第…波” 结构没匹配上，但整段文本里只有一段数字，则直接返回这段数字
         digit_seq = re.findall(r"[0-9]{1,4}", normalized)
         if len(digit_seq) == 1:
             return digit_seq[0]
@@ -338,7 +346,7 @@ class ScreenTextRecognizer:
         text = self._normalize_common_misread(text)
         digits = "".join(ch for ch in text if ch.isdigit())
 
-        # “排除空格的情况”：如果没有任何数字，就返回 None
+        # 如果没有任何数字，就返回 None
         return digits or None
 
     # ------------ 高层封装 ------------
@@ -457,25 +465,32 @@ class ScreenTextRecognizer:
         color_x: int,
         color_y: int,
         save_dir: Optional[str] = None,
+        only_yellow: bool = True,
     ) -> Optional[str]:
         """
-        截取指定区域，获取指定屏幕坐标的像素颜色，在区域内只保留与该颜色完全一致的像素，
+        截取指定区域，获取指定屏幕坐标的像素颜色，在区域内只保留与目标颜色完全一致的像素，
         其他像素全部变为透明，并将结果图片以当前时间戳命名保存。
 
         :param x1: 选区左上或右下 X 坐标（屏幕像素）
         :param y1: 选区左上或右下 Y 坐标（屏幕像素）
         :param x2: 选区左上或右下 X 坐标（屏幕像素）
         :param y2: 选区左上或右下 Y 坐标（屏幕像素）
-        :param color_x: 用于取样颜色的屏幕 X 坐标
-        :param color_y: 用于取样颜色的屏幕 Y 坐标
+        :param color_x: 用于取样颜色的屏幕 X 坐标（仅在 only_yellow=False 时使用）
+        :param color_y: 用于取样颜色的屏幕 Y 坐标（仅在 only_yellow=False 时使用）
         :param save_dir: 图片保存目录；为 None 时使用当前工作目录下的 'color_mask_exports' 子目录
+        :param only_yellow: True 时默认只保留颜色为 #FFD624 (255,214,36) 的像素；
+                            False 时按 (color_x, color_y) 处采样的颜色来过滤。
         :return: 实际保存的文件路径；如果检测到完全相同的图片已存在，则返回 None
         :raises ScreenCaptureError: 截图失败时抛出
         """
         # 截取目标区域
         region_img = self.capture_region(x1, y1, x2, y2)
-        # 读取指定坐标的目标颜色
-        target_color = self.get_pixel_color(color_x, color_y)
+
+        # 决定目标颜色
+        if only_yellow:
+            target_color = (255, 214, 36)  # #FFD624
+        else:
+            target_color = self.get_pixel_color(color_x, color_y)
 
         # 构造只保留目标颜色的透明图
         mask_img = self._build_color_mask_image(region_img, target_color)
