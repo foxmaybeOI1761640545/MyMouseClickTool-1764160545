@@ -4,7 +4,7 @@ if ($ScriptDir) { Set-Location $ScriptDir }
 
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host "  WaveNumberOCR - 安装和启动脚本" -ForegroundColor Cyan
-Write-Host "  屏幕区域标记器" -ForegroundColor Cyan
+Write-Host "  游戏关卡识别器" -ForegroundColor Cyan
 Write-Host "========================================" -ForegroundColor Cyan
 Write-Host ""
 
