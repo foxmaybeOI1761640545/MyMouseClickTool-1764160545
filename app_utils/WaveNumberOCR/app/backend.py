@@ -4,7 +4,7 @@ backend.py - WaveNumberOCR 后端逻辑（EasyOCR 版）
 
 负责：
 - 根据屏幕坐标截取指定区域图像
-- 调用 EasyOCR 识别文字（带简单图像预处理）
+- 调用 EasyOCR 识别文字（带图像预处理）
 - 从识别结果中解析出 “第…波” 中间的波次数字（支持阿拉伯数字 + 中文数字）
 - 提供读取单个屏幕像素颜色的工具方法
 """
@@ -30,7 +30,7 @@ class ScreenTextRecognizer:
     屏幕文字识别器：
     - 截取屏幕指定区域
     - OCR 识别
-    - 解析 “第X波” 中的 X（阿拉伯数字 / 中文）
+    - 解析 “第X波”，返回中间数字
     - 读取任意屏幕像素的 RGB 颜色
     """
 
@@ -95,10 +95,14 @@ class ScreenTextRecognizer:
     @staticmethod
     def _preprocess_for_ocr(image: Image.Image) -> Image.Image:
         """
-        针对游戏 UI 做一些简单预处理，提升 OCR 成功率：
-        - 放大 2~3 倍
-        - 自动对比度
-        - 略微增强对比度和亮度
+        针对游戏中“黄字黑底”的关卡提示文本做预处理，提升 OCR 成功率：
+
+        1. 放大 2~3 倍；
+        2. 根据日志中观察到的颜色 RGB(255, 214, 36) 做 “近似黄色” 颜色提取，
+           把接近该颜色的像素变成白色，其他像素变成黑色，得到黑底白字二值图；
+        3. 自动对比度。
+
+        这样可以尽量把背景噪声去掉，只保留文字形状。
         """
         if image.mode != "RGB":
             image = image.convert("RGB")
@@ -111,12 +115,37 @@ class ScreenTextRecognizer:
             scale = 2
         image = image.resize((w * scale, h * scale), Image.BICUBIC)
 
-        # 自动对比度 + 提升对比度 / 亮度
-        image = ImageOps.autocontrast(image)
-        image = ImageEnhance.Contrast(image).enhance(1.6)
-        image = ImageEnhance.Brightness(image).enhance(1.1)
+        arr = np.array(image).astype("int16")
+        r = arr[:, :, 0]
+        g = arr[:, :, 1]
+        b = arr[:, :, 2]
 
-        return image
+        # 目标颜色：从你的调试日志中看到像素颜色约为 RGB(255, 214, 36)
+        tr, tg, tb = 255, 214, 36
+
+        # 计算每个像素与目标颜色的“距离”（L1 距离）
+        diff = np.abs(r - tr) + np.abs(g - tg) + np.abs(b - tb)
+
+        # 阈值适当放松一点以兼容抗锯齿/压缩带来的轻微色差
+        mask = diff < 80
+
+        # 如果 mask 几乎全黑或几乎全白，说明颜色提取不靠谱，退回到通用预处理
+        ratio = mask.mean() if mask.size > 0 else 0.0
+        if ratio < 0.0005 or ratio > 0.5:
+            # 通用方案：自动对比度 + 提升对比度 / 亮度
+            image = ImageOps.autocontrast(image)
+            image = ImageEnhance.Contrast(image).enhance(1.6)
+            image = ImageEnhance.Brightness(image).enhance(1.1)
+            return image
+
+        # 二值化：黄字位置为白色，其余黑色
+        binary = np.zeros_like(r, dtype="uint8")
+        binary[mask] = 255
+
+        img = Image.fromarray(binary, "L")
+        img = ImageOps.autocontrast(img)
+
+        return img
 
     def ocr_text(self, image: Image.Image) -> str:
         """
@@ -125,8 +154,19 @@ class ScreenTextRecognizer:
         image = self._preprocess_for_ocr(image)
         np_img = np.array(image)
 
-        # detail=0 只返回文字列表；paragraph=True 尝试合并成段落
-        results = self.reader.readtext(np_img, detail=0, paragraph=True)
+        # 限制识别字符范围，强行收缩到“第/波 + 数字/中文数字”
+        allowlist = "第弟波坡0123456789零一二三四五六七八九十两 　"
+
+        try:
+            results = self.reader.readtext(
+                np_img,
+                detail=0,
+                paragraph=True,
+                allowlist=allowlist,
+            )
+        except TypeError:
+            # 兼容旧版本 easyocr（没有 allowlist 参数）
+            results = self.reader.readtext(np_img, detail=0, paragraph=True)
 
         if self.debug:
             print("=== [DEBUG] EasyOCR 识别结果列表 ===")
@@ -149,11 +189,15 @@ class ScreenTextRecognizer:
         """
         处理一些 OCR 常见误识别：
         - 把 I / l / | 视作数字 1
+        - 把 O / o / 〇 视作数字 0
         """
         replacements = {
             "I": "1",
             "l": "1",
             "|": "1",
+            "O": "0",
+            "o": "0",
+            "〇": "0",
         }
         for k, v in replacements.items():
             text = text.replace(k, v)
@@ -222,27 +266,64 @@ class ScreenTextRecognizer:
         normalized = cls._normalize_common_misread(text)
 
         # 1. 优先匹配阿拉伯数字形式：第 1 波
-        pattern_digit = re.compile(r"第\s*([0-9]{1,4})\s*波", re.DOTALL)
+        pattern_digit = re.compile(r"[第弟]\s*([0-9]{1,4})\s*[波坡]", re.DOTALL)
         match = pattern_digit.search(normalized)
         if match:
             return match.group(1)
 
         # 2. 兼容中文数字形式：第一波、第十二波 等
-        pattern_cn = re.compile(r"第\s*([零一二三四五六七八九十两]+)\s*波", re.DOTALL)
+        pattern_cn = re.compile(r"[第弟]\s*([零一二三四五六七八九十两]+)\s*[波坡]", re.DOTALL)
         match = pattern_cn.search(text)
         if match:
             num = cls._chinese_numeral_to_int(match.group(1))
             if num is not None:
                 return str(num)
 
-        # 3. 宽松一点的回退规则：
-        #    例如 OCR 把 “波” 识别成 “坡”等
-        pattern_loose = re.compile(r"[第弟]\s*([0-9]{1,4})\s*[波坡]", re.DOTALL)
-        match = pattern_loose.search(normalized)
-        if match:
-            return match.group(1)
-
         return None
+
+    # ------------ 备用：只识别中间数字区域 ------------
+
+    def _recognize_center_digits(self, image: Image.Image) -> Optional[str]:
+        """
+        兜底方案：
+        - 只截取整体图片中间 40% 宽度的区域（基本只包含数字，不包含“第”和“波”）；
+        - 只允许识别 0~9；
+        - 把识别到的所有数字拼接成一个字符串作为波次。
+
+        当 parse_wave_number 解析失败时会调用本方法。
+        """
+        w, h = image.size
+        if w <= 0 or h <= 0:
+            return None
+
+        left = int(w * 0.3)
+        right = int(w * 0.7)
+        if right <= left:
+            return None
+
+        center_img = image.crop((left, 0, right, h))
+        center_img = self._preprocess_for_ocr(center_img)
+        np_img = np.array(center_img)
+
+        try:
+            results = self.reader.readtext(
+                np_img,
+                detail=0,
+                paragraph=True,
+                allowlist="0123456789",
+            )
+        except TypeError:
+            results = self.reader.readtext(np_img, detail=0, paragraph=True)
+
+        if self.debug:
+            print("=== [DEBUG] 中央数字区域 OCR 结果 ===")
+            for idx, txt in enumerate(results):
+                print(f"  [C{idx}] {repr(txt)}")
+            print("=== [DEBUG] 中央数字区域 END ===")
+
+        text = "".join(results)
+        digits = "".join(ch for ch in text if ch.isdigit())
+        return digits or None
 
     # ------------ 高层封装 ------------
 
@@ -253,6 +334,13 @@ class ScreenTextRecognizer:
         img = self.capture_region(x1, y1, x2, y2)
         text = self.ocr_text(img)
         number = self.parse_wave_number(text)
+
+        if number is None:
+            # 若常规解析失败，再试一次“只识别中间数字”的兜底逻辑
+            if self.debug:
+                print("=== [DEBUG] 常规解析失败，尝试仅识别中间数字区域 ===")
+            number = self._recognize_center_digits(img)
+
         return number
 
     def get_pixel_color(self, x: int, y: int) -> Tuple[int, int, int]:
@@ -318,7 +406,7 @@ class ScreenTextRecognizer:
 
     def _image_already_exists(self, candidate: Image.Image, directory: str) -> bool:
         """
-        在指定目录中查找是否已有与 candidate 像素内容完全一致的图片。
+        在指定目录中查找是否已有与 candidate 像素内容是否完全一致的图片。
         """
         exts = (".png", ".jpg", ".jpeg")
 
