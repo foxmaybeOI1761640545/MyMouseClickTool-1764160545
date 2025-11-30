@@ -7,6 +7,7 @@ gui.py - WaveNumberOCR 图形界面
 - 矩形高亮（在屏幕上用半透明窗口标出选区）
 - 预览截取区域（弹出窗口显示截图）
 - 调用后端执行 OCR，并在控制台和界面显示结果
+- 在连续识别时，同时读取一个指定坐标像素的颜色
 """
 
 from typing import Tuple, Optional
@@ -23,12 +24,15 @@ from backend import ScreenTextRecognizer, ScreenCaptureError
 
 
 # ----------------- 默认坐标（图示坐标）-----------------
-# 这里填的是你现在截图示例中使用的那组坐标：
 # 左上：(800, 250)，右下：(1080, 350)
 DEFAULT_X1 = 800
 DEFAULT_Y1 = 250
 DEFAULT_X2 = 1080
 DEFAULT_Y2 = 350
+
+# 需要读取像素颜色的默认坐标
+DEFAULT_COLOR_X = 935
+DEFAULT_COLOR_Y = 300
 
 
 class WaveNumberApp:
@@ -36,7 +40,7 @@ class WaveNumberApp:
     WaveNumberOCR 主界面类。
     """
 
-    def __init__(self, recognizer: ScreenTextRecognizer):
+    def __init__(self, recognizer: ScreenTextRecognizer) -> None:
         self.recognizer = recognizer
 
         self.root = tk.Tk()
@@ -50,7 +54,7 @@ class WaveNumberApp:
         self._highlight_remaining: int = 0
         self._highlight_timer_id: Optional[str] = None
 
-        # 存放覆盖矩形窗口和预览窗口的引用（便于更新/关闭）
+        # 用于预览/覆盖窗口
         self._overlay_window: Optional[tk.Toplevel] = None
         self._preview_window: Optional[tk.Toplevel] = None
         self._preview_photo: Optional[ImageTk.PhotoImage] = None
@@ -64,7 +68,7 @@ class WaveNumberApp:
 
         self._build_ui()
 
-        # 固定一个最小窗口大小，避免点击按钮后窗口被自动缩小
+        # 固定一个最小窗口大小，避免点击按钮后主窗口被自动缩小
         self.root.update_idletasks()
         self.root.minsize(self.root.winfo_width(), self.root.winfo_height())
 
@@ -81,11 +85,11 @@ class WaveNumberApp:
         main_frame = ttk.Frame(self.root)
         main_frame.grid(row=0, column=0, sticky="nsew", **pad)
 
-        # 坐标输入区（两行：左上、右下）
+        # 坐标输入区
         coord_frame = ttk.LabelFrame(main_frame, text="坐标输入（屏幕像素）")
         coord_frame.grid(row=0, column=0, sticky="ew", **pad)
 
-        # 左上角坐标
+        # 左上角
         ttk.Label(coord_frame, text="左上 X：").grid(row=0, column=0, sticky="e", **pad)
         self.entry_x1 = ttk.Entry(coord_frame, width=10)
         self.entry_x1.grid(row=0, column=1, **pad)
@@ -94,7 +98,7 @@ class WaveNumberApp:
         self.entry_y1 = ttk.Entry(coord_frame, width=10)
         self.entry_y1.grid(row=0, column=3, **pad)
 
-        # 右下角坐标
+        # 右下角
         ttk.Label(coord_frame, text="右下 X：").grid(row=1, column=0, sticky="e", **pad)
         self.entry_x2 = ttk.Entry(coord_frame, width=10)
         self.entry_x2.grid(row=1, column=1, **pad)
@@ -103,7 +107,7 @@ class WaveNumberApp:
         self.entry_y2 = ttk.Entry(coord_frame, width=10)
         self.entry_y2.grid(row=1, column=3, **pad)
 
-        # —— 初始化坐标为默认图示值 ——
+        # 初始化默认坐标
         self.entry_x1.insert(0, str(DEFAULT_X1))
         self.entry_y1.insert(0, str(DEFAULT_Y1))
         self.entry_x2.insert(0, str(DEFAULT_X2))
@@ -125,19 +129,22 @@ class WaveNumberApp:
         btn_quit = ttk.Button(btn_frame, text="退出当前程序", command=self._on_close)
         btn_quit.grid(row=0, column=3, **pad)
 
-        # 高亮倒计时显示
-        highlight_label = ttk.Label(main_frame, textvariable=self.highlight_countdown_var, foreground="darkred")
+        # 高亮倒计时
+        highlight_label = ttk.Label(
+            main_frame, textvariable=self.highlight_countdown_var, foreground="darkred"
+        )
         highlight_label.grid(row=2, column=0, sticky="w", **pad)
 
-        # 结果显示
-        result_label = ttk.Label(main_frame, textvariable=self.result_var, foreground="blue")
-        result_label.grid(row=3, column=0, sticky="w", **pad)
+        # 识别结果 + 像素颜色
+        self.result_label = ttk.Label(main_frame, textvariable=self.result_var, foreground="blue")
+        self.result_label.grid(row=3, column=0, sticky="w", **pad)
 
-        # 提示
         hint_label = ttk.Label(
             main_frame,
-            text="提示：坐标为屏幕像素，左上角大致为 (0, 0)，向右为 X+，向下为 Y+。",
-            foreground="gray"
+            text=(
+                "提示：坐标为屏幕像素，左上角大致为 (0, 0)，向右为 X+，向下为 Y+。"
+            ),
+            foreground="gray",
         )
         hint_label.grid(row=4, column=0, sticky="w", **pad)
 
@@ -145,8 +152,7 @@ class WaveNumberApp:
 
     def _register_hotkeys(self) -> None:
         """
-        注册全局快捷键 Ctrl+Q，触发与按钮“开始识别‘第X波’”相同的逻辑。
-        使用 keyboard 库，在后台线程中监听按键，再通过 Tk 的 after 回到主线程。
+        注册全局快捷键 Ctrl+Q：与“开始/暂停识别关卡”按钮行为相同。
         """
         try:
             keyboard.add_hotkey("ctrl+q", lambda: self.root.after(0, self._on_recognize))
@@ -154,7 +160,7 @@ class WaveNumberApp:
         except Exception as exc:  # pylint: disable=broad-except
             print(f"注册全局快捷键失败：{exc}")
 
-    # ----------------- 事件处理 -----------------
+    # ----------------- 工具方法 -----------------
 
     def _get_coords_from_entries(self) -> Tuple[int, int, int, int]:
         """
@@ -174,10 +180,13 @@ class WaveNumberApp:
 
         return x1, y1, x2, y2
 
+    # ----------------- 事件处理：预览 / 高亮 -----------------
+
     def _on_preview_region(self) -> None:
         """
         预览选区：截取屏幕指定区域并在弹出窗口中显示截图。
-        多次点击时只保留最新的一张截图，避免累积多个截图控件。
+        多次点击时只保留最新的一张截图。
+        同时修复：如果用户手动放大预览窗口，再次点击按钮时不再把窗口变小。
         """
         try:
             coords = self._get_coords_from_entries()
@@ -195,28 +204,37 @@ class WaveNumberApp:
         if self._preview_window is None or not self._preview_window.winfo_exists():
             self._preview_window = tk.Toplevel(self.root)
             self._preview_window.title("选区预览")
+            self._preview_window.resizable(True, True)
             self._preview_label = ttk.Label(self._preview_window)
-            self._preview_label.pack()
+            self._preview_label.pack(fill="both", expand=True)
         else:
             self._preview_window.deiconify()
             self._preview_window.lift()
             if self._preview_label is None or not self._preview_label.winfo_exists():
                 self._preview_label = ttk.Label(self._preview_window)
-                self._preview_label.pack()
+                self._preview_label.pack(fill="both", expand=True)
 
-        # 将 PIL Image 转为 PhotoImage，并更新到同一个 Label 上
+        # 更新截图
         self._preview_photo = ImageTk.PhotoImage(img)
         self._preview_label.configure(image=self._preview_photo)
-        self._preview_label.image = self._preview_photo  # 防止被垃圾回收
+        self._preview_label.image = self._preview_photo  # 避免被 GC 回收
 
-        # 根据图像大小调整窗口大小
-        self._preview_window.geometry(f"{img.width}x{img.height}")
+        # 根据图像大小调整窗口大小：
+        # 只在需要变大时扩大窗口尺寸，不会把用户已经放大的窗口再缩回去。
+        img_w, img_h = img.width, img.height
+        self._preview_window.update_idletasks()
+        cur_w = self._preview_window.winfo_width()
+        cur_h = self._preview_window.winfo_height()
+        new_w = max(cur_w, img_w)
+        new_h = max(cur_h, img_h)
+        # 如果窗口刚创建，cur_w/cur_h 会很小，此时会被提升到图片大小；
+        # 如果用户手动拉大过窗口，则保持较大的值，不会被缩小。
+        self._preview_window.geometry(f"{new_w}x{new_h}")
 
     def _on_highlight_region(self) -> None:
         """
         在屏幕上用半透明红色矩形高亮显示用户输入的坐标区域。
-        这是一个独立的无边框顶层窗口。
-        新增：带 3 秒倒计时显示，倒计时结束后自动隐藏高亮。
+        新增 3 秒自动消失的倒计时显示。
         """
         try:
             x1, y1, x2, y2 = self._get_coords_from_entries()
@@ -224,7 +242,8 @@ class WaveNumberApp:
             messagebox.showerror("输入错误", str(exc), parent=self.root)
             return
 
-        left, top, right, bottom = self.recognizer.normalize_box(x1, y1, x2, y2)
+        from backend import ScreenTextRecognizer as _STR  # 避免循环导入类型检查报错
+        left, top, right, bottom = _STR.normalize_box(x1, y1, x2, y2)
         width = right - left
         height = bottom - top
 
@@ -237,7 +256,6 @@ class WaveNumberApp:
             self._overlay_window = tk.Toplevel(self.root)
             self._overlay_window.overrideredirect(True)  # 无边框
             self._overlay_window.attributes("-topmost", True)
-            # 半透明红色矩形；注意某些平台可能不支持 alpha 或颜色设置
             self._overlay_window.attributes("-alpha", 0.3)
             self._overlay_window.configure(bg="red")
 
@@ -274,12 +292,11 @@ class WaveNumberApp:
     def _hide_overlay(self) -> None:
         """
         隐藏高亮窗口（如果存在）。
-        使用 withdraw 而不是 destroy，这样下次还能复用。
         """
         if self._overlay_window is not None and self._overlay_window.winfo_exists():
             self._overlay_window.withdraw()
 
-    # ----------------- 连续识别（多线程 + 日志） -----------------
+    # ----------------- 连续识别（多线程） -----------------
 
     def _on_recognize(self) -> None:
         """
@@ -289,7 +306,6 @@ class WaveNumberApp:
         - 可通过按钮点击或全局快捷键 Ctrl+Q 触发本方法。
         """
         if not self._recognizing:
-            # 准备启动连续识别
             try:
                 coords = self._get_coords_from_entries()
             except ValueError as exc:
@@ -300,23 +316,20 @@ class WaveNumberApp:
             self._recognize_seconds = 0
             self._recognize_coords = coords
             self._update_recognize_button_text()
-            self.result_var.set("识别结果：开始连续识别（Ctrl+Q 可暂停）")
+            self.result_var.set(
+                "识别结果：开始连续识别（Ctrl+Q 可暂停）"
+            )
 
-            # 启动后台线程
             self._recognize_thread = threading.Thread(
                 target=self._recognize_loop, daemon=True
             )
             self._recognize_thread.start()
         else:
-            # 暂停连续识别
             self._recognizing = False
             self._update_recognize_button_text()
             self.result_var.set("识别结果：已暂停连续识别（Ctrl+Q 再次开始）")
 
     def _update_recognize_button_text(self) -> None:
-        """
-        根据当前识别状态更新按钮文字。
-        """
         if self._recognizing:
             self.btn_recognize.configure(text="暂停识别关卡")
         else:
@@ -325,32 +338,52 @@ class WaveNumberApp:
     def _recognize_loop(self) -> None:
         """
         后台线程：每秒执行一次识别，直到 _recognizing 被置为 False。
-        识别日志以“第n秒: 内容”的形式输出到控制台。
+        日志格式：第n秒: 识别结果 / 像素颜色。
+        同时返回指定坐标 (DEFAULT_COLOR_X, DEFAULT_COLOR_Y) 的像素颜色。
         """
         assert self._recognize_coords is not None
 
         while self._recognizing:
             self._recognize_seconds += 1
 
+            # 先进行关卡文字识别
             try:
                 number = self.recognizer.capture_and_recognize(
                     *self._recognize_coords
                 )
                 if number is None:
-                    content = "null"
-                    gui_text = "识别结果：null（未找到“第…波”模式）"
+                    wave_content = "null"
+                    base_gui_text = "识别结果：null（未找到“第…波”模式）"
                 else:
-                    content = str(number)
-                    gui_text = f"识别结果：{number}"
+                    wave_content = str(number)
+                    base_gui_text = f"识别结果：{number}"
             except ScreenCaptureError as exc:
-                content = f"截屏失败：{exc}"
-                gui_text = f"识别结果：截屏失败：{exc}"
+                wave_content = f"截屏失败：{exc}"
+                base_gui_text = f"识别结果：截屏失败：{exc}"
             except Exception as exc:  # pylint: disable=broad-except
-                content = f"OCR 错误：{exc}"
-                gui_text = f"识别结果：OCR 错误：{exc}"
+                wave_content = f"OCR 错误：{exc}"
+                base_gui_text = f"识别结果：OCR 错误：{exc}"
 
-            log_line = f"第{self._recognize_seconds}秒: {content}"
+            # 读取指定坐标像素颜色
+            color_info = ""
+            try:
+                r, g, b = self.recognizer.get_pixel_color(
+                    DEFAULT_COLOR_X, DEFAULT_COLOR_Y
+                )
+                hex_color = f"#{r:02X}{g:02X}{b:02X}"
+                color_info = (
+                    f"像素({DEFAULT_COLOR_X}, {DEFAULT_COLOR_Y}) 颜色："
+                    f"RGB({r}, {g}, {b}) / {hex_color}"
+                )
+            except ScreenCaptureError as exc:
+                color_info = f"像素颜色获取失败：{exc}"
+            except Exception as exc:  # pylint: disable=broad-except
+                color_info = f"像素颜色错误：{exc}"
+
+            log_line = f"第{self._recognize_seconds}秒: {wave_content} | {color_info}"
             print(log_line)
+
+            gui_text = f"{base_gui_text} | {color_info}"
 
             # 更新 GUI 文本（回到主线程）
             self.root.after(0, self._update_result_text, gui_text)
@@ -362,10 +395,9 @@ class WaveNumberApp:
                 time.sleep(0.1)
 
     def _update_result_text(self, text: str) -> None:
-        """
-        在主线程中更新识别结果显示。
-        """
         self.result_var.set(text)
+
+    # ----------------- 关闭 -----------------
 
     def _on_close(self) -> None:
         """
@@ -380,7 +412,6 @@ class WaveNumberApp:
         except Exception:
             pass
 
-        # 先关闭 overlay
         if self._overlay_window is not None and self._overlay_window.winfo_exists():
             self._overlay_window.destroy()
 

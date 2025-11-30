@@ -1,11 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-backend.py - WaveNumberOCR 后端逻辑（EasyOCR 加强版）
+backend.py - WaveNumberOCR 后端逻辑（EasyOCR 版）
 
 负责：
 - 根据屏幕坐标截取指定区域图像
 - 调用 EasyOCR 识别文字（带简单图像预处理）
 - 从识别结果中解析出 “第…波” 中间的波次数字（支持阿拉伯数字 + 中文数字）
+- 提供读取单个屏幕像素颜色的工具方法
 """
 
 from typing import Optional, Tuple, List
@@ -18,7 +19,7 @@ import easyocr
 
 
 class ScreenCaptureError(Exception):
-    """自定义异常：截屏相关错误."""
+    """自定义异常：截屏相关错误。"""
     pass
 
 
@@ -27,7 +28,8 @@ class ScreenTextRecognizer:
     屏幕文字识别器：
     - 截取屏幕指定区域
     - OCR 识别
-    - 解析 “第X波” 中的 X（阿拉伯数字）
+    - 解析 “第X波” 中的 X（阿拉伯数字 / 中文）
+    - 读取任意屏幕像素的 RGB 颜色
     """
 
     def __init__(
@@ -35,15 +37,16 @@ class ScreenTextRecognizer:
         languages: Optional[List[str]] = None,
         gpu: bool = False,
         debug: bool = False,
-    ):
+    ) -> None:
         """
         :param languages: OCR 语言列表，默认 ['ch_sim', 'en']（简体中文 + 英文）
-        :param gpu: 是否使用 GPU，默认 False（纯 CPU 即可）
+        :param gpu: 是否使用 GPU，默认 False
         :param debug: 是否输出调试信息（打印 EasyOCR 原始结果等）
         """
         if languages is None:
             languages = ["ch_sim", "en"]
 
+        # easyocr 的初始化比较耗时，整个应用只创建一个 reader 实例
         self.reader = easyocr.Reader(languages, gpu=gpu)
         self.debug = debug
 
@@ -71,7 +74,9 @@ class ScreenTextRecognizer:
         height = bottom - top
 
         if width <= 0 or height <= 0:
-            raise ScreenCaptureError(f"截屏区域宽高必须为正数，目前 width={width}, height={height}")
+            raise ScreenCaptureError(
+                f"截屏区域宽高必须为正数，目前 width={width}, height={height}"
+            )
 
         try:
             with mss.mss() as sct:
@@ -82,26 +87,6 @@ class ScreenTextRecognizer:
 
         img = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
         return img
-
-    def get_pixel_color(self, x: int, y: int) -> Tuple[int, int, int]:
-        """
-        获取屏幕上某个像素点的 RGB 颜色值。
-
-        :param x: 屏幕 X 坐标（像素）
-        :param y: 屏幕 Y 坐标（像素）
-        :return: (R, G, B)
-        :raises ScreenCaptureError: 截屏失败时抛出。
-        """
-        try:
-            with mss.mss() as sct:
-                monitor = {"left": int(x), "top": int(y), "width": 1, "height": 1}
-                sct_img = sct.grab(monitor)
-        except Exception as exc:  # pylint: disable=broad-except
-            raise ScreenCaptureError(f"获取像素颜色时截屏失败: {exc}") from exc
-
-        img = Image.frombytes("RGB", sct_img.size, sct_img.rgb)
-        r, g, b = img.getpixel((0, 0))
-        return r, g, b
 
     # ------------ 图像预处理 + OCR ------------
 
@@ -117,7 +102,7 @@ class ScreenTextRecognizer:
             image = image.convert("RGB")
 
         w, h = image.size
-        # 选区本身不算太大，可以适当放大
+        # 选区一般不算太大，可以适当放大
         if w < 400:
             scale = 3
         else:
@@ -180,8 +165,18 @@ class ScreenTextRecognizer:
         """
         s = s.replace("两", "二")  # “两”按 2 处理
 
-        digits = {"零": 0, "一": 1, "二": 2, "三": 3, "四": 4,
-                  "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+        digits = {
+            "零": 0,
+            "一": 1,
+            "二": 2,
+            "三": 3,
+            "四": 4,
+            "五": 5,
+            "六": 6,
+            "七": 7,
+            "八": 8,
+            "九": 9,
+        }
 
         if not s:
             return None
@@ -247,7 +242,7 @@ class ScreenTextRecognizer:
 
         return None
 
-    # ------------ 封装的一键调用 ------------
+    # ------------ 高层封装 ------------
 
     def capture_and_recognize(self, x1: int, y1: int, x2: int, y2: int) -> Optional[str]:
         """
@@ -257,3 +252,17 @@ class ScreenTextRecognizer:
         text = self.ocr_text(img)
         number = self.parse_wave_number(text)
         return number
+
+    def get_pixel_color(self, x: int, y: int) -> Tuple[int, int, int]:
+        """
+        读取屏幕上单个像素的颜色。
+
+        :param x: 像素的 X 坐标（屏幕像素）
+        :param y: 像素的 Y 坐标（屏幕像素）
+        :return: (R, G, B)
+        :raises ScreenCaptureError: 截屏失败时抛出
+        """
+        # 截取一个 1x1 的小区域即可
+        img = self.capture_region(x, y, x + 1, y + 1)
+        r, g, b = img.getpixel((0, 0))
+        return int(r), int(g), int(b)
