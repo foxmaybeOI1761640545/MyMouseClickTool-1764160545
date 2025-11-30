@@ -364,7 +364,7 @@ class ScreenTextRecognizer:
         :param y2: 选区左上或右下 Y 坐标（屏幕像素）
         :param color_x: 用于取样颜色的屏幕 X 坐标
         :param color_y: 用于取样颜色的屏幕 Y 坐标
-        :param save_dir: 图片保存目录；为 None 时使用当前工作目录
+        :param save_dir: 图片保存目录；为 None 时使用当前工作目录下的 'color_mask_exports' 子目录
         :return: 实际保存的文件路径；如果检测到完全相同的图片已存在，则返回 None
         :raises ScreenCaptureError: 截图失败时抛出
         """
@@ -376,11 +376,10 @@ class ScreenTextRecognizer:
         # 构造只保留目标颜色的透明图
         mask_img = self._build_color_mask_image(region_img, target_color)
 
-        # 确定保存目录
+        # 确定保存目录：若未指定，则使用当前工作目录下的 'color_mask_exports' 子目录
         if save_dir is None:
-            save_dir = os.getcwd()
-        else:
-            os.makedirs(save_dir, exist_ok=True)
+            save_dir = os.path.join(os.getcwd(), "color_mask_exports")
+        os.makedirs(save_dir, exist_ok=True)
 
         # 检查是否已有内容完全一致的图片
         if self._image_already_exists(mask_img, save_dir):

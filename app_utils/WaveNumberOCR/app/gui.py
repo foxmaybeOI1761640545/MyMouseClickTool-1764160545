@@ -72,7 +72,7 @@ class WaveNumberApp:
         self.root.update_idletasks()
         self.root.minsize(self.root.winfo_width(), self.root.winfo_height())
 
-        # 注册全局快捷键 Ctrl+Q，用于开始/暂停连续识别
+        # 注册全局快捷键 Alt+Q / Alt+W
         self._register_hotkeys()
 
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -169,11 +169,14 @@ class WaveNumberApp:
 
     def _register_hotkeys(self) -> None:
         """
-        注册全局快捷键 Ctrl+Q：与“开始/暂停识别关卡”按钮行为相同。
+        注册全局快捷键：
+        - Alt+Q：开始/暂停连续识别
+        - Alt+W：导出纯色图片
         """
         try:
-            keyboard.add_hotkey("ctrl+q", lambda: self.root.after(0, self._on_recognize))
-            print("已注册全局快捷键：Ctrl+Q 用于开始/暂停连续识别。")
+            keyboard.add_hotkey("alt+q", lambda: self.root.after(0, self._on_recognize))
+            keyboard.add_hotkey("alt+w", lambda: self.root.after(0, self._on_save_color_mask))
+            print("已注册全局快捷键：Alt+Q 用于开始/暂停连续识别；Alt+W 用于导出纯色图片。")
         except Exception as exc:  # pylint: disable=broad-except
             print(f"注册全局快捷键失败：{exc}")
 
@@ -373,7 +376,7 @@ class WaveNumberApp:
         触发/暂停连续识别：
         - 第一次触发时，读取当前坐标，启动后台线程每秒识别一次；
         - 再次触发时，暂停识别；
-        - 可通过按钮点击或全局快捷键 Ctrl+Q 触发本方法。
+        - 可通过按钮点击或全局快捷键 Alt+Q 触发本方法。
         """
         if not self._recognizing:
             try:
@@ -387,7 +390,7 @@ class WaveNumberApp:
             self._recognize_coords = coords
             self._update_recognize_button_text()
             self.result_var.set(
-                "识别结果：开始连续识别（Ctrl+Q 可暂停）"
+                "识别结果：开始连续识别（Alt+Q 可暂停）"
             )
 
             self._recognize_thread = threading.Thread(
@@ -397,7 +400,7 @@ class WaveNumberApp:
         else:
             self._recognizing = False
             self._update_recognize_button_text()
-            self.result_var.set("识别结果：已暂停连续识别（Ctrl+Q 再次开始）")
+            self.result_var.set("识别结果：已暂停连续识别（Alt+Q 再次开始）")
 
     def _update_recognize_button_text(self) -> None:
         if self._recognizing:
