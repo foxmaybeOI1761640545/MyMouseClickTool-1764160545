@@ -11,9 +11,11 @@ backend.py - WaveNumberOCR 后端逻辑（EasyOCR 版）
 
 from typing import Optional, Tuple, List
 import re
+import os
+import time
 
 import mss
-from PIL import Image, ImageEnhance, ImageOps
+from PIL import Image, ImageEnhance, ImageOps, ImageChops
 import numpy as np
 import easyocr
 
@@ -266,3 +268,128 @@ class ScreenTextRecognizer:
         img = self.capture_region(x, y, x + 1, y + 1)
         r, g, b = img.getpixel((0, 0))
         return int(r), int(g), int(b)
+
+    # ------------ 颜色过滤并保存图片 ------------
+
+    @staticmethod
+    def _build_color_mask_image(
+        region_img: Image.Image, target_color: Tuple[int, int, int]
+    ) -> Image.Image:
+        """
+        从区域图像中只保留与目标 RGB 完全一致的像素，其他像素全部变为透明。
+        返回带 Alpha 通道的 RGBA 图像。
+        """
+        if region_img.mode != "RGBA":
+            region_img = region_img.convert("RGBA")
+
+        arr = np.array(region_img)
+        r = arr[:, :, 0]
+        g = arr[:, :, 1]
+        b = arr[:, :, 2]
+
+        tr, tg, tb = target_color
+        mask = (r == tr) & (g == tg) & (b == tb)
+
+        # 所有像素先置为全透明，再把匹配的像素设为不透明
+        arr[:, :, 3] = 0
+        arr[mask, 3] = 255
+
+        # 非匹配像素 RGB 也清零，避免残留颜色
+        arr[~mask, 0] = 0
+        arr[~mask, 1] = 0
+        arr[~mask, 2] = 0
+
+        return Image.fromarray(arr, "RGBA")
+
+    @staticmethod
+    def _is_same_image(img1: Image.Image, img2: Image.Image) -> bool:
+        """
+        判断两张图片内容是否完全一致（尺寸、模式一致且逐像素相同）。
+        """
+        if img1.size != img2.size:
+            return False
+
+        if img1.mode != img2.mode:
+            img2 = img2.convert(img1.mode)
+
+        diff = ImageChops.difference(img1, img2)
+        # 如果没有任何非零像素，getbbox() 返回 None，说明完全一致
+        return diff.getbbox() is None
+
+    def _image_already_exists(self, candidate: Image.Image, directory: str) -> bool:
+        """
+        在指定目录中查找是否已有与 candidate 像素内容完全一致的图片。
+        """
+        exts = (".png", ".jpg", ".jpeg")
+
+        try:
+            file_names = os.listdir(directory)
+        except OSError:
+            return False
+
+        candidate_rgba = candidate.convert("RGBA")
+
+        for name in file_names:
+            if not name.lower().endswith(exts):
+                continue
+            path = os.path.join(directory, name)
+            try:
+                with Image.open(path) as existing:
+                    existing_rgba = existing.convert("RGBA")
+                    if self._is_same_image(candidate_rgba, existing_rgba):
+                        return True
+            except Exception:
+                # 忽略无法打开的文件
+                continue
+
+        return False
+
+    def save_region_color_mask(
+        self,
+        x1: int,
+        y1: int,
+        x2: int,
+        y2: int,
+        color_x: int,
+        color_y: int,
+        save_dir: Optional[str] = None,
+    ) -> Optional[str]:
+        """
+        截取指定区域，获取指定屏幕坐标的像素颜色，在区域内只保留与该颜色完全一致的像素，
+        其他像素全部变为透明，并将结果图片以当前时间戳命名保存。
+
+        :param x1: 选区左上或右下 X 坐标（屏幕像素）
+        :param y1: 选区左上或右下 Y 坐标（屏幕像素）
+        :param x2: 选区左上或右下 X 坐标（屏幕像素）
+        :param y2: 选区左上或右下 Y 坐标（屏幕像素）
+        :param color_x: 用于取样颜色的屏幕 X 坐标
+        :param color_y: 用于取样颜色的屏幕 Y 坐标
+        :param save_dir: 图片保存目录；为 None 时使用当前工作目录
+        :return: 实际保存的文件路径；如果检测到完全相同的图片已存在，则返回 None
+        :raises ScreenCaptureError: 截图失败时抛出
+        """
+        # 截取目标区域
+        region_img = self.capture_region(x1, y1, x2, y2)
+        # 读取指定坐标的目标颜色
+        target_color = self.get_pixel_color(color_x, color_y)
+
+        # 构造只保留目标颜色的透明图
+        mask_img = self._build_color_mask_image(region_img, target_color)
+
+        # 确定保存目录
+        if save_dir is None:
+            save_dir = os.getcwd()
+        else:
+            os.makedirs(save_dir, exist_ok=True)
+
+        # 检查是否已有内容完全一致的图片
+        if self._image_already_exists(mask_img, save_dir):
+            return None
+
+        # 以时间戳命名文件，例如 1764495345.png
+        timestamp = str(int(time.time()))
+        filename = f"{timestamp}.png"
+        save_path = os.path.join(save_dir, filename)
+
+        mask_img.save(save_path)
+        return save_path

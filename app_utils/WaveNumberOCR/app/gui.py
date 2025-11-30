@@ -107,11 +107,23 @@ class WaveNumberApp:
         self.entry_y2 = ttk.Entry(coord_frame, width=10)
         self.entry_y2.grid(row=1, column=3, **pad)
 
+        # 颜色取样用坐标（指定屏幕像素）
+        ttk.Label(coord_frame, text="颜色坐标 X：").grid(row=2, column=0, sticky="e", **pad)
+        self.entry_color_x = ttk.Entry(coord_frame, width=10)
+        self.entry_color_x.grid(row=2, column=1, **pad)
+
+        ttk.Label(coord_frame, text="颜色坐标 Y：").grid(row=2, column=2, sticky="e", **pad)
+        self.entry_color_y = ttk.Entry(coord_frame, width=10)
+        self.entry_color_y.grid(row=2, column=3, **pad)
+
         # 初始化默认坐标
         self.entry_x1.insert(0, str(DEFAULT_X1))
         self.entry_y1.insert(0, str(DEFAULT_Y1))
         self.entry_x2.insert(0, str(DEFAULT_X2))
         self.entry_y2.insert(0, str(DEFAULT_Y2))
+
+        self.entry_color_x.insert(0, str(DEFAULT_COLOR_X))
+        self.entry_color_y.insert(0, str(DEFAULT_COLOR_Y))
 
         # 按钮区
         btn_frame = ttk.Frame(main_frame)
@@ -126,8 +138,13 @@ class WaveNumberApp:
         self.btn_recognize = ttk.Button(btn_frame, text="开始识别关卡", command=self._on_recognize)
         self.btn_recognize.grid(row=0, column=2, **pad)
 
+        btn_save_mask = ttk.Button(
+            btn_frame, text="导出纯色图片", command=self._on_save_color_mask
+        )
+        btn_save_mask.grid(row=0, column=3, **pad)
+
         btn_quit = ttk.Button(btn_frame, text="退出当前程序", command=self._on_close)
-        btn_quit.grid(row=0, column=3, **pad)
+        btn_quit.grid(row=0, column=4, **pad)
 
         # 高亮倒计时
         highlight_label = ttk.Label(
@@ -179,6 +196,19 @@ class WaveNumberApp:
             raise ValueError("选区宽度和高度都必须大于 0，请重新输入坐标。")
 
         return x1, y1, x2, y2
+
+    def _get_color_coord_from_entries(self) -> Tuple[int, int]:
+        """
+        从文本框中读取颜色取样坐标，并转换为整数。
+        若输入不合法，抛出 ValueError，由调用方处理。
+        """
+        try:
+            cx = int(self.entry_color_x.get())
+            cy = int(self.entry_color_y.get())
+        except ValueError as exc:
+            raise ValueError("颜色坐标必须为整数，请检查输入。") from exc
+
+        return cx, cy
 
     # ----------------- 事件处理：预览 / 高亮 -----------------
 
@@ -295,6 +325,46 @@ class WaveNumberApp:
         """
         if self._overlay_window is not None and self._overlay_window.winfo_exists():
             self._overlay_window.withdraw()
+
+    def _on_save_color_mask(self) -> None:
+        """
+        按颜色过滤并保存图片：
+        - 从当前坐标截取区域；
+        - 取“颜色坐标”处像素的 RGB 作为目标颜色；
+        - 保留区域内与该颜色完全一致的像素，其余像素设为透明；
+        - 以当前时间戳命名图片（如 1764495345.png）；
+        - 如有内容完全一致的图片，则不重复保存。
+        """
+        try:
+            x1, y1, x2, y2 = self._get_coords_from_entries()
+            color_x, color_y = self._get_color_coord_from_entries()
+        except ValueError as exc:
+            messagebox.showerror("输入错误", str(exc), parent=self.root)
+            return
+
+        try:
+            save_path = self.recognizer.save_region_color_mask(
+                x1, y1, x2, y2, color_x, color_y
+            )
+        except ScreenCaptureError as exc:
+            messagebox.showerror("截屏失败", str(exc), parent=self.root)
+            return
+        except Exception as exc:  # pylint: disable=broad-except
+            messagebox.showerror("错误", f"保存图片时发生错误：{exc}", parent=self.root)
+            return
+
+        if save_path is None:
+            messagebox.showinfo(
+                "已跳过保存",
+                "检测到已经存在内容完全一致的图片，本次未保存新文件。",
+                parent=self.root,
+            )
+        else:
+            messagebox.showinfo(
+                "保存成功",
+                f"已保存图片：{save_path}",
+                parent=self.root,
+            )
 
     # ----------------- 连续识别（多线程） -----------------
 
