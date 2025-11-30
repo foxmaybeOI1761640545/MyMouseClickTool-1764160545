@@ -154,8 +154,9 @@ class ScreenTextRecognizer:
         image = self._preprocess_for_ocr(image)
         np_img = np.array(image)
 
-        # 限制识别字符范围，强行收缩到“第/波 + 数字/中文数字”
-        allowlist = "第弟波坡0123456789零一二三四五六七八九十两 　"
+        # 限制识别字符范围，强行收缩到“第/波 + 数字/中文数字 + 常见误识别”
+        # 注意这里重新允许 I / l / | / O / o / 〇，方便后续归一化成 1 / 0
+        allowlist = "第弟波坡0123456789零一二三四五六七八九十两Il|Oo〇 　"
 
         try:
             results = self.reader.readtext(
@@ -190,6 +191,7 @@ class ScreenTextRecognizer:
         处理一些 OCR 常见误识别：
         - 把 I / l / | 视作数字 1
         - 把 O / o / 〇 视作数字 0
+        - 把连续空白压缩成一个普通空格，方便正则匹配并“排除空格的干扰”
         """
         replacements = {
             "I": "1",
@@ -201,6 +203,9 @@ class ScreenTextRecognizer:
         }
         for k, v in replacements.items():
             text = text.replace(k, v)
+
+        # 压缩所有空白为单个空格
+        text = re.sub(r"\s+", " ", text)
         return text
 
     @staticmethod
@@ -262,7 +267,7 @@ class ScreenTextRecognizer:
         从文本中解析 “第X波”，返回 X（阿拉伯数字字符串）。
         若未找到则返回 None。
         """
-        # 先做一次常见误识别归一化
+        # 先做一次常见误识别归一化（包含 I/l/| -> 1、压缩空白）
         normalized = cls._normalize_common_misread(text)
 
         # 1. 优先匹配阿拉伯数字形式：第 1 波
@@ -273,11 +278,16 @@ class ScreenTextRecognizer:
 
         # 2. 兼容中文数字形式：第一波、第十二波 等
         pattern_cn = re.compile(r"[第弟]\s*([零一二三四五六七八九十两]+)\s*[波坡]", re.DOTALL)
-        match = pattern_cn.search(text)
+        match = pattern_cn.search(normalized)
         if match:
             num = cls._chinese_numeral_to_int(match.group(1))
             if num is not None:
                 return str(num)
+
+        # 3. 如果 “第…波” 结构没匹配上，但整段文本里只有一段数字，则直接返回这段数字
+        digit_seq = re.findall(r"[0-9]{1,4}", normalized)
+        if len(digit_seq) == 1:
+            return digit_seq[0]
 
         return None
 
@@ -287,7 +297,7 @@ class ScreenTextRecognizer:
         """
         兜底方案：
         - 只截取整体图片中间 40% 宽度的区域（基本只包含数字，不包含“第”和“波”）；
-        - 只允许识别 0~9；
+        - 允许识别 0~9 + I/l/|/O/o/〇，并在提取前做同样的归一化；
         - 把识别到的所有数字拼接成一个字符串作为波次。
 
         当 parse_wave_number 解析失败时会调用本方法。
@@ -305,12 +315,14 @@ class ScreenTextRecognizer:
         center_img = self._preprocess_for_ocr(center_img)
         np_img = np.array(center_img)
 
+        allowlist = "0123456789Il|Oo〇 "
+
         try:
             results = self.reader.readtext(
                 np_img,
                 detail=0,
                 paragraph=True,
-                allowlist="0123456789",
+                allowlist=allowlist,
             )
         except TypeError:
             results = self.reader.readtext(np_img, detail=0, paragraph=True)
@@ -322,7 +334,11 @@ class ScreenTextRecognizer:
             print("=== [DEBUG] 中央数字区域 END ===")
 
         text = "".join(results)
+        # 归一化后再提取数字（这样 I/l/|/O/o/〇 → 1/0，同时压缩空格）
+        text = self._normalize_common_misread(text)
         digits = "".join(ch for ch in text if ch.isdigit())
+
+        # “排除空格的情况”：如果没有任何数字，就返回 None
         return digits or None
 
     # ------------ 高层封装 ------------
@@ -406,7 +422,7 @@ class ScreenTextRecognizer:
 
     def _image_already_exists(self, candidate: Image.Image, directory: str) -> bool:
         """
-        在指定目录中查找是否已有与 candidate 像素内容是否完全一致的图片。
+        在指定目录中查找是否已有与 candidate 像素内容完全一致的图片。
         """
         exts = (".png", ".jpg", ".jpeg")
 
