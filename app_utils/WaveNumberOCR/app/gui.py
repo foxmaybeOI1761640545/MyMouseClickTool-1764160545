@@ -35,6 +35,18 @@ DEFAULT_Y2 = 350
 DEFAULT_COLOR_X = 845
 DEFAULT_COLOR_Y = 311
 
+# # 左上：(800, 300)，右下：(1080, 370)
+# DEFAULT_X1 = 800
+# DEFAULT_Y1 = 300
+# DEFAULT_X2 = 1080
+# DEFAULT_Y2 = 370
+
+# # 需要读取像素颜色的默认坐标
+# DEFAULT_COLOR_X = 845
+# DEFAULT_COLOR_Y = 354
+
+# 默认坐标颜色#FFD624
+DEFAULT_COLOR_COLOR = "#FFD624"
 
 class WaveNumberApp:
     """
