@@ -13,6 +13,7 @@ gui.py - WaveNumberOCR 图形界面
 from typing import Tuple, Optional
 import threading
 import time
+import os
 
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -31,8 +32,8 @@ DEFAULT_X2 = 1080
 DEFAULT_Y2 = 350
 
 # 需要读取像素颜色的默认坐标
-DEFAULT_COLOR_X = 935
-DEFAULT_COLOR_Y = 300
+DEFAULT_COLOR_X = 845
+DEFAULT_COLOR_Y = 311
 
 
 class WaveNumberApp:
@@ -44,7 +45,7 @@ class WaveNumberApp:
         self.recognizer = recognizer
 
         self.root = tk.Tk()
-        self.root.title("WaveNumberOCR - 第X波识别工具")
+        self.root.title("WaveNumberOCR")
         self.root.resizable(False, False)
 
         # 用于显示识别结果
@@ -65,6 +66,8 @@ class WaveNumberApp:
         self._recognize_thread: Optional[threading.Thread] = None
         self._recognize_seconds: int = 0
         self._recognize_coords: Optional[Tuple[int, int, int, int]] = None
+        # wave_snapshots 颜色掩码导出使用的颜色坐标（在开始连续识别时从输入框读取）
+        self._snapshot_color_coord: Optional[Tuple[int, int]] = None
 
         self._build_ui()
 
@@ -381,6 +384,7 @@ class WaveNumberApp:
         if not self._recognizing:
             try:
                 coords = self._get_coords_from_entries()
+                color_coord = self._get_color_coord_from_entries()
             except ValueError as exc:
                 messagebox.showerror("输入错误", str(exc), parent=self.root)
                 return
@@ -388,6 +392,8 @@ class WaveNumberApp:
             self._recognizing = True
             self._recognize_seconds = 0
             self._recognize_coords = coords
+            # 在开始连续识别时固定一次颜色坐标，避免在后台线程中访问 Tk 组件
+            self._snapshot_color_coord = color_coord
             self._update_recognize_button_text()
             self.result_var.set(
                 "识别结果：开始连续识别（Alt+Q 可暂停）"
@@ -416,6 +422,9 @@ class WaveNumberApp:
         """
         assert self._recognize_coords is not None
 
+        snapshot_dir = os.path.join(os.getcwd(), "wave_snapshots")
+        color_coord = self._snapshot_color_coord
+
         while self._recognizing:
             self._recognize_seconds += 1
 
@@ -437,7 +446,7 @@ class WaveNumberApp:
                 wave_content = f"OCR 错误：{exc}"
                 base_gui_text = f"识别结果：OCR 错误：{exc}"
 
-            # 读取指定坐标像素颜色
+            # 读取指定坐标像素颜色（保持原有功能：使用 DEFAULT_COLOR_X/Y）
             color_info = ""
             try:
                 r, g, b = self.recognizer.get_pixel_color(
@@ -455,6 +464,38 @@ class WaveNumberApp:
 
             log_line = f"第{self._recognize_seconds}秒: {wave_content} | {color_info}"
             print(log_line)
+
+            # 每次识别后，将对应选区的颜色掩码图片导出到 wave_snapshots 目录
+            # 该过程不弹出任何提示框，仅在控制台输出保存结果
+            if color_coord is not None:
+                cx, cy = color_coord
+            else:
+                cx, cy = DEFAULT_COLOR_X, DEFAULT_COLOR_Y
+
+            try:
+                snapshot_path = self.recognizer.save_region_color_mask(
+                    *self._recognize_coords,
+                    cx,
+                    cy,
+                    save_dir=snapshot_dir,
+                    only_yellow=False,
+                )
+                if snapshot_path is None:
+                    print(
+                        f"[wave_snapshot] 第{self._recognize_seconds}秒：检测到重复图片，未保存。"
+                    )
+                else:
+                    print(
+                        f"[wave_snapshot] 第{self._recognize_seconds}秒：已保存图片：{snapshot_path}"
+                    )
+            except ScreenCaptureError as exc:
+                print(
+                    f"[wave_snapshot] 第{self._recognize_seconds}秒：截屏失败，未保存：{exc}"
+                )
+            except Exception as exc:  # pylint: disable=broad-except
+                print(
+                    f"[wave_snapshot] 第{self._recognize_seconds}秒：保存 wave_snapshots 图片时出错：{exc}"
+                )
 
             gui_text = f"{base_gui_text} | {color_info}"
 
